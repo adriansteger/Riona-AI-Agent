@@ -74,7 +74,7 @@ export async function runAgent(
         return runAgent(schema, prompt, currentAgentApiKeyIndex);
       } catch (keyError) {
         if (keyError instanceof Error) {
-          logger.error("API key error:", keyError.message);
+          logger.error(`API key error: ${keyError.message}`);
           return `Error: ${keyError.message}`;
         } else {
           logger.error("Unknown error when trying to get next API key");
@@ -87,43 +87,88 @@ export async function runAgent(
 }
 
 // ===== ZMIENIONE: Ładowanie Adrian's Style =====
-export function chooseCharacter(): any {
-  // Try to load Adrian's custom style first
+export function chooseCharacter(characterFilename?: string): any {
+  // Always start with Adrian's custom style as the BASE configuration (for limits, styles, etc.)
+  let baseConfig: any = {};
+
   try {
-    // Use __dirname to get relative path that works in both src and build
-    // __dirname will be src/Agent or build/Agent, so go up one level to reach config
     const adrianStylePath = path.join(__dirname, "..", "config", "adrian-style");
-    logger.info(`Loading Adrian's custom style configuration from: ${adrianStylePath}`);
-    const adrianStyle = require(adrianStylePath).default || require(adrianStylePath).adrianStyleConfig;
-    logger.info(`✅ Adrian's style loaded successfully!`);
-    return adrianStyle;
-  } catch (adrianError) {
-    logger.warn(`Could not load adrian-style: ${adrianError instanceof Error ? adrianError.message : String(adrianError)}`);
-    logger.warn(`Falling back to JSON characters`);
+    baseConfig = require(adrianStylePath).default || require(adrianStylePath).adrianStyleConfig;
+  } catch (e) {
+    logger.error("Failed to load base configuration (adrian-style):", e);
+    // Minimal fallback if base configuration fails
+    baseConfig = {
+      limits: { likesPerHour: 10, commentsPerHour: 2 },
+      behavior: { enableLikes: true, enableComments: true }
+    };
+  }
 
-    // Fallback to JSON characters
-    const charactersDir = (() => {
-      const buildPath = path.join(__dirname, "characters");
-      return fs.existsSync(buildPath)
-        ? buildPath
-        : path.join(process.cwd(), "src", "Agent", "characters");
-    })();
-
-    const files = fs.readdirSync(charactersDir);
-    const jsonFiles = files.filter((file) => file.endsWith(".json"));
-    if (jsonFiles.length === 0) {
-      throw new Error("No character JSON files found and no adrian-style.ts available");
+  // If no specific filename, or explicitly adrian-style, return base (potentially with legacy merge)
+  if (!characterFilename || characterFilename === 'adrian-style') {
+    // Legacy behavior: try to merge Ascotech if it exists by default? 
+    // Or just return base. Let's return base but keep the legacy "auto-merge" if user didn't specify.
+    if (!characterFilename) {
+      // ... existing legacy auto-merge logic if desired, or skip. 
+      // For strictness, if no file specified, just return base. 
+      logger.info("No character specified. Using default Adrian style.");
+      return baseConfig;
     }
+    return baseConfig;
+  }
 
-    const chosenFile = path.join(charactersDir, jsonFiles[0]);
-    logger.info(`Automatically selected character: ${jsonFiles[0]}`);
-    const data = fs.readFileSync(chosenFile, "utf8");
-    return JSON.parse(data);
+  // If a specific character file is requested, load and merge it
+  try {
+    const characterPath = path.join(__dirname, "characters", characterFilename);
+    if (fs.existsSync(characterPath)) {
+      logger.info(`Loading specific character from: ${characterPath}`);
+      const charData = JSON.parse(fs.readFileSync(characterPath, 'utf-8'));
+
+      // MERGING LOGIC
+      // 1. Merge basic settings
+      if (charData.settings?.behavior) {
+        baseConfig.behavior = { ...baseConfig.behavior, ...charData.settings.behavior };
+      }
+
+      // 2. Merge Knowledge/Bio into focusOn
+      const extraKnowledge = [
+        ...(charData.bio || []).map((b: string) => `Bio: ${b}`),
+        ...(charData.lore || []).map((l: string) => `Lore: ${l}`),
+        ...(charData.knowledge || []).map((k: string) => `Knowledge: ${k}`)
+      ];
+
+      if (baseConfig.aiPersona?.mindset) {
+        if (!baseConfig.aiPersona.mindset.focusOn) baseConfig.aiPersona.mindset.focusOn = [];
+        baseConfig.aiPersona.mindset.focusOn.push(...extraKnowledge);
+      }
+
+      // 3. Merge Topics
+      if (charData.topics && baseConfig.contentThemes) {
+        if (!baseConfig.contentThemes.specificTopics) baseConfig.contentThemes.specificTopics = [];
+        baseConfig.contentThemes.specificTopics.push(...charData.topics);
+      }
+
+      // 4. Override specific limits if present in JSON
+      if (charData.limits) {
+        baseConfig.limits = { ...baseConfig.limits, ...charData.limits };
+      }
+
+      logger.info(`Merged ${characterFilename} into base configuration.`);
+      return baseConfig;
+
+    } else {
+      logger.warn(`Character file ${characterFilename} not found. Returning default base.`);
+      return baseConfig;
+    }
+  } catch (e) {
+    logger.error(`Error loading/merging character ${characterFilename}: ${e}`);
+    return baseConfig;
   }
 }
 
 export function initAgent(): any {
   try {
+    // const characterFile = 'src/Agent/characters/Ascotech.Agent.json';
+    // const character = JSON.parse(fs.readFileSync(characterFile, 'utf-8'));
     const character = chooseCharacter();
     console.log("Character/Style selected:", character);
     return character;

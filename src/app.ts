@@ -6,11 +6,18 @@ import cors from "cors";
 import session from 'express-session';
 
 import logger, { setupErrorHandlers } from "./config/logger";
-import { setup_HandleError } from "./utils";
+import { setup_HandleError, ActivityTracker } from "./utils";
+import path from 'path';
 import { connectDB } from "./config/db";
 import apiRoutes from "./routes/api";
+import { getIgClient } from "./client/Instagram"; // Import getIgClient
+import { IGusername, IGpassword } from "./secret"; // Import credentials
 // import { main as twitterMain } from './client/Twitter'; //
 // import { main as githubMain } from './client/GitHub'; //
+import { IgClient } from "./client/IG-bot/IgClient";
+import accountConfig from "./config/accounts.json";
+import { createAccountLogger } from "./config/logger";
+import { chooseCharacter } from "./Agent";
 
 // Set up process-level error handlers
 setupErrorHandlers();
@@ -26,12 +33,12 @@ connectDB();
 
 // Middleware setup
 app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-            "script-src": ["'self'", "'unsafe-inline'"],
-        },
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "script-src": ["'self'", "'unsafe-inline'"],
     },
+  },
 }));
 app.use(cors());
 app.use(express.json()); // JSON body parsing
@@ -44,17 +51,125 @@ app.use(session({
   cookie: { maxAge: 2 * 60 * 60 * 1000, sameSite: 'lax' },
 }));
 
+import fs from 'fs';
+
 // Serve static files from the 'public' directory
-app.use(express.static('frontend/dist'));
+const frontendPath = path.join(__dirname, '../frontend/dist');
+const frontendExists = fs.existsSync(frontendPath);
+
+if (frontendExists) {
+  app.use(express.static(frontendPath));
+}
 
 // API Routes
 app.use('/api', apiRoutes);
 
 app.get('*', (_req, res) => {
-    res.sendFile('index.html', { root: 'frontend/dist' });
+  if (frontendExists && fs.existsSync(path.join(frontendPath, 'index.html'))) {
+    res.sendFile('index.html', { root: frontendPath });
+  } else {
+    res.status(200).json({ status: 'API is running', message: 'Frontend not found/built' });
+  }
 });
 
-/*
+// Define runInstagram
+const runInstagram = async () => {
+  logger.info("Starting Multi-Account Instagram Bot...");
+
+  // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
+  const accounts: any[] = accountConfig;
+
+  for (const account of accounts) {
+    if (!account.enabled) {
+      logger.info(`Skipping disabled account: ${account.id}`);
+      continue;
+    }
+
+    const accountLogger = createAccountLogger(account.id);
+    accountLogger.info(`>>> Starting session for account: ${account.id} (${account.username}) <<<`);
+
+    try {
+      // Load specific character for this account
+      const character = chooseCharacter(account.character);
+      accountLogger.info(`Loaded character: ${character?.aiPersona?.name || "Default/Unknown"}`);
+
+      // --- SETTINGS MERGE (Moved up for pre-check) ---
+      // 1. Get defaults from Character (or hard defaults)
+      const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true };
+      const characterLimits = character?.limits || { likesPerHour: 10, commentsPerHour: 5 };
+
+      // 2. Get overrides from Account Config (accounts.json)
+      const accountBehavior = account.settings?.behavior || {};
+      const accountLimits = account.settings?.limits || {};
+
+      // 3. Merge: Account settings take precedence
+      const behavior = { ...characterBehavior, ...accountBehavior };
+      const limits = { ...characterLimits, ...accountLimits };
+
+      // --- PRE-RUN AVAILABILITY CHECK ---
+      const trackerId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
+      const activityTracker = new ActivityTracker(trackerId);
+
+      const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
+      const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
+
+      // If a feature is disabled, we consider it "ready" (time=0) effectively, but we need to check if *enabled* features are blocked.
+      // Logic: If I want to like, and I can't... wait. If I want to comment, and I can't... wait.
+      // If ALL enabled features are blocked, we skip.
+
+      let isBlocked = false;
+      let maxWaitTime = 0;
+
+      if (behavior.enableLikes !== false && msToNextLike > 0) {
+        if (behavior.enableComments === false || msToNextComment > 0) {
+          // Likes blocked, and comments either disabled or blocked -> BLOCKED
+          isBlocked = true;
+          maxWaitTime = Math.max(msToNextLike, msToNextComment);
+        }
+      } else if (behavior.enableComments !== false && msToNextComment > 0) {
+        if (behavior.enableLikes === false || msToNextLike > 0) {
+          // Comments blocked, and likes either disabled or blocked -> BLOCKED
+          isBlocked = true;
+          maxWaitTime = Math.max(msToNextLike, msToNextComment);
+        }
+      }
+
+      if (isBlocked) {
+        const waitMinutes = Math.ceil(maxWaitTime / 60000);
+        accountLogger.warn(`Limits reached. Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
+        continue;
+      }
+
+      // Initialize Client with account config and isolated logger
+      const igClient = new IgClient({
+        username: account.username,
+        password: account.password,
+        userDataDir: account.userDataDir,
+        proxy: account.proxy
+      }, accountLogger);
+
+      await igClient.init();
+
+      accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
+      accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
+
+      await igClient.interactWithPosts({ behavior, limits });
+
+      await igClient.close();
+      accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
+
+    } catch (error) {
+      accountLogger.error(`Error processing account ${account.id}: ${error}`);
+    }
+
+    // Delay between accounts
+    const switchDelay = 10000;
+    logger.info(`Waiting ${switchDelay / 1000}s before next account...`);
+    await new Promise(r => setTimeout(r, switchDelay));
+  }
+  logger.info("All accounts processed.");
+};
+
 const runAgents = async () => {
   while (true) {
     logger.info("Starting Instagram agent iteration...");
@@ -77,7 +192,6 @@ const runAgents = async () => {
 runAgents().catch((error) => {
   setup_HandleError(error, "Error running agents:");
 });
-*/
 
 // Error handling
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

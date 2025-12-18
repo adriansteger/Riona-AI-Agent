@@ -38,7 +38,7 @@ const customTimestamp = () => {
 };
 
 // Function to get emojis based on log level
-const getEmojiForLevel = (level : string) :string => {
+const getEmojiForLevel = (level: string): string => {
     switch (level) {
         case 'info':
             return '💡'; // Light bulb for info
@@ -121,5 +121,24 @@ export function setupErrorHandlers(): void {
         logger.warn(`Warning: ${warning.message || warning}`);
     });
 }
+
+// ... existing logger ...
+
+export const createAccountLogger = (accountId: string) => {
+    return createLogger({
+        level: "info",
+        format: format.combine(
+            format.timestamp(),
+            format.printf(({ timestamp, level, message }) => {
+                return `[${timestamp}] ${level}: ${message}`;
+            })
+        ),
+        transports: [
+            new transports.Console(),
+            new transports.File({ filename: `logs/${accountId}.log` }),
+            new transports.File({ filename: `logs/${accountId}-error.log`, level: "error" }),
+        ],
+    });
+};
 
 export default logger;

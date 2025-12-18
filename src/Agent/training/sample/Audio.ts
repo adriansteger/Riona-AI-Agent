@@ -1,13 +1,14 @@
 import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { geminiApiKeys } from "../../../secret/index";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
-import mime from "mime-types";  
+import mime from "mime-types";
 
 dotenv.config();
 
-const apiKey = process.env.GEMINI_API_KEY_41;
+const apiKey = geminiApiKeys[0];
 if (!apiKey) {
   throw new Error("API key is missing");
 }

@@ -1,0 +1,38 @@
+[
+    {
+        "id": "account_1",
+        "username": "YOUR_USERNAME",
+        "password": "YOUR_PASSWORD",
+        "proxy": "",
+        "character": "adrian-style",
+        "settings": {
+            "behavior": {
+                "enableLikes": true,
+                "enableComments": false
+            },
+            "limits": {
+                "likesPerHour": 25
+            }
+        },
+        "userDataDir": "./profiles/account_1",
+        "enabled": false
+    },
+    {
+        "id": "account_2",
+        "username": "YOUR_USERNAME",
+        "password": "YOUR_PASSWORD",
+        "proxy": "",
+        "character": "adrian-style",
+        "settings": {
+            "behavior": {
+                "enableLikes": true,
+                "enableComments": false
+            },
+            "limits": {
+                "likesPerHour": 25
+            }
+        },
+        "userDataDir": "./profiles/account_2",
+        "enabled": false
+    }
+]

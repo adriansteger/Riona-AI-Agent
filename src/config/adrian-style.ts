@@ -16,6 +16,12 @@ export const adrianStyleConfig = {
     expertise: ['hospitality_management', 'restaurant_operations', 'beach_clubs', 'property_investment']
   },
 
+  // ===== BEHAVIOR =====
+  behavior: {
+    enableComments: true,
+    enableLikes: true
+  },
+
   // ===== STYL KOMUNIKACJI =====
   communicationStyle: {
     tone: 'business-casual',
