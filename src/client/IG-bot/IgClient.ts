@@ -701,7 +701,10 @@ export class IgClient {
                         this.logger.warn(`Error liking post in hashtag mode: ${e}`);
                     }
                 } else {
-                    if (behavior.enableLikes !== false) this.logger.info("Hourly like limit reached.");
+                    if (behavior.enableLikes !== false) {
+                        this.logger.info("Hourly like limit reached. Stopping hashtag session.");
+                        break;
+                    }
                 }
 
                 // --- NEXT POST NAVIGATION ---
