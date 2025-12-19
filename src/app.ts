@@ -153,7 +153,19 @@ const runInstagram = async () => {
       accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
       accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
 
-      await igClient.interactWithPosts({ behavior, limits });
+      const hashtags = account.settings?.hashtags || [];
+      const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
+
+      // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
+      const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
+
+      if (useHashtags) {
+        accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
+        await igClient.interactWithHashtags(hashtags, { behavior, limits });
+      } else {
+        accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
+        await igClient.interactWithPosts({ behavior, limits });
+      }
 
       await igClient.close();
       accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);

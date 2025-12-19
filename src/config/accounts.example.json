@@ -6,6 +6,12 @@
         "proxy": "",
         "character": "adrian-style",
         "settings": {
+            "hashtags": [
+                "ai",
+                "tech",
+                "coding"
+            ],
+            "hashtagMix": 0.5, // 0.0 = Feed only, 1.0 = Hashtags only
             "behavior": {
                 "enableLikes": true,
                 "enableComments": false
@@ -24,6 +30,12 @@
         "proxy": "",
         "character": "adrian-style",
         "settings": {
+            "hashtags": [
+                "ai",
+                "tech",
+                "coding"
+            ],
+            "hashtagMix": 0.5, // 0.0 = Feed only, 1.0 = Hashtags only
             "behavior": {
                 "enableLikes": true,
                 "enableComments": false

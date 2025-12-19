@@ -87,7 +87,7 @@ export class IgClient {
         this.logger.info(`Launching browser with options: ${JSON.stringify({ ...launchOptions, args: launchOptions.args.map((a: string) => a.startsWith('--proxy-server') ? '--proxy-server=REDACTED' : a) }, null, 2)}`);
 
         let attempt = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 5;
         while (attempt < maxAttempts) {
             try {
                 this.browser = await puppeteerExtra.launch(launchOptions);
@@ -119,7 +119,10 @@ export class IgClient {
                     }
                 }
 
-                await delay(5000); // Pasue before retry
+                // Increase backoff delay slightly with each attempt
+                const waitTime = 8000 + (attempt * 2000);
+                this.logger.info(`Waiting ${waitTime / 1000} seconds before retrying...`);
+                await delay(waitTime);
             }
         }
 
@@ -587,6 +590,160 @@ export class IgClient {
         }
     }
 
+    async interactWithHashtags(hashtags: string[], options: {
+        behavior?: { enableLikes?: boolean; enableComments?: boolean; },
+        limits?: { likesPerHour?: number; commentsPerHour?: number; }
+    } = {}) {
+        if (!this.page) throw new Error("Page not initialized");
+        const { behavior = { enableLikes: true, enableComments: true }, limits } = options;
+
+        if (!hashtags || hashtags.length === 0) {
+            this.logger.warn("No hashtags provided for interaction.");
+            return;
+        }
+
+        const maxLikesPerHour = limits?.likesPerHour || 10;
+        const maxCommentsPerHour = limits?.commentsPerHour || 5;
+
+        // Initialize Activity Tracker
+        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const activityTracker = new ActivityTracker(accountId);
+
+        this.logger.info(`Starting Hashtag Interaction session. Tags: [${hashtags.join(', ')}]`);
+
+        // Pick a random hashtag
+        const tag = hashtags[Math.floor(Math.random() * hashtags.length)];
+        this.logger.info(`Selected hashtag: #${tag}`);
+
+        try {
+            await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "networkidle2" });
+            await delay(3000);
+
+            // Check if tag page loaded (posts exist)
+            // Selector for the first post in the grid (Top Posts or Most Recent)
+            // Typically: _aagw is the image container class. 
+            // Better to select by anchor tag in the grid.
+            // Start with robust selectors for the grid
+            // 1. main tag containing links to posts
+            // 2. generic links to /p/ (posts)
+            const postSelectors = [
+                'main article a[href*="/p/"]',
+                'main a[href*="/p/"]',
+                'div._aagw', // Common class for image containers, parent usually has link
+                'a[href^="/p/"]' // Fallback
+            ];
+
+            let firstPost = null;
+            for (const selector of postSelectors) {
+                try {
+                    await this.page.waitForSelector(selector, { timeout: 5000 });
+                    firstPost = await this.page.$(selector);
+                    if (firstPost) {
+                        this.logger.info(`Found post using selector: ${selector}`);
+                        break;
+                    }
+                } catch (e) { }
+            }
+
+            if (!firstPost) {
+                this.logger.error("No posts found for this hashtag with any selector.");
+                await this.page.screenshot({ path: `logs/debug_hashtag_${tag}_error.png` });
+                const body = await this.page.evaluate(() => document.body.innerHTML.substring(0, 1000));
+                this.logger.error(`Debug HTML: ${body}`);
+                throw new Error("No posts found.");
+            }
+
+            this.logger.info(`Opened #${tag} page. Clicking first post...`);
+            await firstPost.click();
+            await delay(3000); // Wait for modal to open
+
+            let postsProcessed = 0;
+            const maxPosts = 10; // Limit for this session
+
+            while (postsProcessed < maxPosts) {
+                // Check exit flag
+                if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
+                    this.logger.info('Exit requested. Stopping hashtag loop.');
+                    break;
+                }
+
+                // --- LIKING LOGIC (Modal) ---
+                // In modal, the Like button selector might be different or standard
+                // Often: svg[aria-label="Like"] or "Unlike"
+                // Connectivity check is crucial here too
+
+                const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
+                if (canLike) {
+                    try {
+                        // Wait for like button to be visible in the modal
+                        const likeSelector = 'article[role="presentation"] svg[aria-label="Like"]';
+                        // Note: 'article[role="presentation"]' targets the modal content
+
+                        const likeButton = await this.page.$(likeSelector);
+                        if (likeButton) {
+                            const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                            if (isConnected) {
+                                this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
+                                await likeButton.click();
+                                await delay(1000 + Math.random() * 1000);
+                                activityTracker.trackAction('likes');
+                            }
+                        } else {
+                            // Maybe already liked?
+                            const unlikeSelector = 'article[role="presentation"] svg[aria-label="Unlike"]';
+                            if (await this.page.$(unlikeSelector)) {
+                                this.logger.info(`Post ${postsProcessed + 1} already liked.`);
+                            } else {
+                                this.logger.info(`Like button not found for post ${postsProcessed + 1}.`);
+                            }
+                        }
+                    } catch (e) {
+                        this.logger.warn(`Error liking post in hashtag mode: ${e}`);
+                    }
+                } else {
+                    if (behavior.enableLikes !== false) this.logger.info("Hourly like limit reached.");
+                }
+
+                // --- NEXT POST NAVIGATION ---
+                postsProcessed++;
+                if (postsProcessed >= maxPosts) break;
+
+                try {
+                    // "Next" arrow in modal. Often svg[aria-label="Next"] or generic button
+                    const nextArrowSelector = 'svg[aria-label="Next"]';
+                    const nextButton = await this.page.$(`button ${nextArrowSelector}, a ${nextArrowSelector}, ${nextArrowSelector}`); // Flexible search
+                    // Usually the SVG is inside a button or anchor
+                    // More robust: search by aria-label "Next" on SVG
+
+                    // We need to click the PARENT element usually (the button), not just the SVG
+                    const nextElement = await this.page.evaluateHandle(() => {
+                        const svgs = Array.from(document.querySelectorAll('svg[aria-label="Next"]'));
+                        if (svgs.length > 0) return svgs[0].closest('button') || svgs[0].closest('a') || svgs[0];
+                        return null;
+                    });
+
+                    const nextElementHandle = nextElement.asElement();
+
+                    if (nextElementHandle) {
+                        this.logger.info("Navigating to next post...");
+                        await (nextElementHandle as puppeteer.ElementHandle<Element>).click();
+                        await delay(3000 + Math.random() * 2000); // Wait for next post to load
+                    } else {
+                        this.logger.warn("Next arrow not found. Reached end of available posts?");
+                        break;
+                    }
+
+                } catch (e) {
+                    this.logger.warn(`Error navigating to next post: ${e}`);
+                    break;
+                }
+            }
+
+        } catch (e) {
+            this.logger.error(`Error in interactWithHashtags: ${e}`);
+        }
+    }
+
     async interactWithPosts(options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
         limits?: { likesPerHour?: number; commentsPerHour?: number; }
@@ -891,7 +1048,20 @@ export class IgClient {
 
     public async close() {
         if (this.browser) {
-            await this.browser.close();
+            try {
+                // Get process ID before closing
+                const proc = this.browser.process();
+                await this.browser.close();
+
+                // Ensure double-tap kill if process still exists (optional/aggressive)
+                if (proc) {
+                    try {
+                        proc.kill('SIGKILL');
+                    } catch (e) { }
+                }
+            } catch (e) {
+                this.logger.warn(`Error closing browser gracefully: ${e}`);
+            }
             this.browser = null;
             this.page = null;
         }
