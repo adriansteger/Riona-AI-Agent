@@ -149,7 +149,17 @@ export class IgClient {
             await this.loginWithCookies();
         } else if (this.userDataDir) {
             // With persistent profile, cookies are auto-loaded. Just check login state.
-            await this.page.goto("https://www.instagram.com/", { waitUntil: "networkidle2" });
+            try {
+                await this.page.goto("https://www.instagram.com/", { waitUntil: "networkidle2" });
+            } catch (navErr) {
+                this.logger.warn(`Initial navigation failed (${navErr}), Retrying...`);
+                try {
+                    if (this.page.isClosed()) this.page = await this.browser.newPage();
+                    await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+                } catch (retryErr) {
+                    throw new Error(`Critical: Failed to navigate to Instagram: ${retryErr}`);
+                }
+            }
             await delay(2000); // Give it a moment to render
             const currentUrl = this.page.url();
             this.logger.info(`Current URL after navigation: ${currentUrl}`);
@@ -176,20 +186,30 @@ export class IgClient {
                 this.logger.info("Restored session from profile (Login fields not found). Checking for interruptions...");
 
                 // Handle Cookie Wall / "Save Info" / "Notifications" even if we think we are logged in
-                await this.handleCookieConsent();
-                await this.handleNotificationPopup();
-                await this.handleAutomatedBehaviorWarning(); // Check for "Automated Behavior" warning
+                // Wrap in try-catch to avoid "Execution context destroyed" if page reloads
+                try {
+                    await this.handleCookieConsent();
+                    await this.handleNotificationPopup();
+                } catch (e) { this.logger.warn(`Ignored error during popup check: ${e}`); }
+
+                try {
+                    await this.handleAutomatedBehaviorWarning(); // Check for "Automated Behavior" warning
+                } catch (e) { this.logger.warn(`Ignored error during warning check: ${e}`); }
 
                 // Check for "Not Now" button (e.g. Save Info, Try New Look, etc.)
-                const notNowButton = await this.page.evaluateHandle(() => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    return buttons.find(b => b.textContent === 'Not Now') || null;
-                });
-                const notNowButtonHandle = notNowButton.asElement();
-                if (notNowButtonHandle) {
-                    this.logger.info("Found 'Not Now' button on restored session. Clicking...");
-                    await notNowButtonHandle.evaluate((b: any) => b.click());
-                    await delay(2000);
+                try {
+                    const notNowButton = await this.page.evaluateHandle(() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        return buttons.find(b => b.textContent === 'Not Now') || null;
+                    });
+                    const notNowButtonHandle = notNowButton.asElement();
+                    if (notNowButtonHandle) {
+                        this.logger.info("Found 'Not Now' button on restored session. Clicking...");
+                        await notNowButtonHandle.evaluate((b: any) => b.click());
+                        await delay(2000);
+                    }
+                } catch (e) {
+                    this.logger.warn(`Ignored error during 'Not Now' check (possible frame detach): ${e}`);
                 }
 
                 await this.page.screenshot({ path: 'logs/debug_session_restored.png' });
