@@ -6,7 +6,7 @@ import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
 import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
-import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker } from "../../utils";
+import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile } from "../../utils";
 import { runAgent } from "../../Agent";
 import path from "path";
 import { getInstagramCommentSchema } from "../../Agent/schema";
@@ -108,14 +108,26 @@ export class IgClient {
 
                 this.logger.info("Waiting 5 seconds before retrying...");
 
-                // FORCE CLEANUP: Try to remove "SingletonLock" if it exists
+                // FORCE CLEANUP: Kill zombie processes holding locks, then delete files
                 if (this.userDataDir) {
                     try {
-                        const lockPath = path.join(path.resolve(process.cwd(), this.userDataDir), 'SingletonLock');
-                        await fs.unlink(lockPath);
-                        this.logger.warn(`Deleted stale lock file during retry: ${lockPath}`);
-                    } catch (e) {
-                        // Include ignoring of error where file is missing
+                        this.logger.info("Attempting to kill lingering Chrome processes for this profile...");
+                        await killChromeProcessByProfile(this.userDataDir);
+                    } catch (e: any) {
+                        this.logger.warn(`Process kill failed (non-critical): ${e.message}`);
+                    }
+
+                    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+                    for (const file of lockFiles) {
+                        try {
+                            const lockPath = path.join(path.resolve(process.cwd(), this.userDataDir), file);
+                            if (await fs.stat(lockPath).catch(() => false)) {
+                                await fs.unlink(lockPath);
+                                this.logger.warn(`Deleted stale lock file during retry: ${lockPath}`);
+                            }
+                        } catch (e) {
+                            this.logger.warn(`Failed to delete lock file ${file}: ${e}`);
+                        }
                     }
                 }
 
@@ -139,7 +151,7 @@ export class IgClient {
                     });
                 }
             } catch (e) {
-                this.logger.warn(`Failed to parse/authenticate proxy URL: ${this.proxy}`);
+                this.logger.warn(`Proxy auth setup failed (non-critical): ${e}`);
             }
         }
 

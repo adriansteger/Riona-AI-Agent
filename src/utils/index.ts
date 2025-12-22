@@ -215,4 +215,4 @@ export const saveScrapedData = async (link: string, content: string): Promise<vo
 };
 // ---------------------- Activity Tracker ----------------------
 export * from './activityTracker';
-export * from './activityTracker';
+export * from './browserHelper';
