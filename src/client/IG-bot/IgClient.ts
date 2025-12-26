@@ -57,13 +57,19 @@ export class IgClient {
         const launchArgs = [
             `--window-size=${width},${height}`,
             `--window-position=${left},${top}`,
+            // User requested background/minimized launch
+            '--start-minimized',
             // Stability flags (Optimized for Windows)
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
             '--no-first-run',
-            // Removed Linux-specific/aggressive flags that might cause startup failure
-            '--mute-audio' // Good practice
+            '--mute-audio', // Good practice
+            // Critical stability flags for avoiding TargetCloseError with Stealth Plugin
+            '--disable-ipc-flooding-protection',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-renderer-backgrounding',
+            '--enable-features=NetworkService,NetworkServiceInProcess'
         ];
 
         if (this.proxy) {
@@ -74,6 +80,8 @@ export class IgClient {
             headless: false,
             args: launchArgs,
             defaultViewport: null, // Ensure viewport matches window
+            protocolTimeout: 180000, // Increase timeout to 3 minutes to prevent Runtime.callFunctionOn timeouts
+            timeout: 60000, // Explicit 60s timeout for browser launch to prevent infinite hangs
         };
 
         if (this.userDataDir) {
@@ -93,6 +101,16 @@ export class IgClient {
                 this.browser = await puppeteerExtra.launch(launchOptions);
                 // Move newPage inside the try block to catch "Requesting main frame too early" errors
                 this.page = await this.browser.newPage();
+
+                // FORCE MINIMIZE: Use CDP to explicitly minimize the window to background
+                try {
+                    const session = await this.page.createCDPSession();
+                    const { windowId } = await session.send("Browser.getWindowForTarget") as any;
+                    await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
+                } catch (minErr) {
+                    this.logger.warn(`Failed to minimize window (non-critical): ${minErr}`);
+                }
+
                 break; // Success
             } catch (err) {
                 attempt++;
@@ -731,26 +749,46 @@ export class IgClient {
                     // More robust: search by aria-label "Next" on SVG
 
                     // We need to click the PARENT element usually (the button), not just the SVG
-                    const nextElement = await this.page.evaluateHandle(() => {
-                        const svgs = Array.from(document.querySelectorAll('svg[aria-label="Next"]'));
-                        if (svgs.length > 0) return svgs[0].closest('button') || svgs[0].closest('a') || svgs[0];
-                        return null;
-                    });
+                    // --- NAVIGATION TO NEXT POST ---
+                    try {
+                        // Robustly find the next arrow
+                        const nextElement = await this.page.evaluateHandle(() => {
+                            const svgs = Array.from(document.querySelectorAll('svg[aria-label="Next"]'));
+                            if (svgs.length > 0) return svgs[0].closest('button') || svgs[0].closest('a') || svgs[0];
+                            return null;
+                        }).catch((e: Error) => {
+                            this.logger.warn(`Navigation selector failed (frame detached?): ${e.message}`);
+                            return null;
+                        });
 
-                    const nextElementHandle = nextElement.asElement();
+                        if (nextElement && nextElement.asElement()) {
+                            const nextElementHandle = nextElement.asElement();
+                            if (nextElementHandle) {
+                                this.logger.info("Navigating to next post...");
+                                // Click and wait, catching any detachment errors during the transition
+                                await Promise.all([
+                                    (nextElementHandle as puppeteer.ElementHandle<Element>).click(),
+                                    delay(3000 + Math.random() * 2000)
+                                ]);
+                            } else {
+                                this.logger.warn("Next element handle is null. Stopping.");
+                                break;
+                            }
+                        } else {
+                            this.logger.warn("Next arrow not found. Reached end of available posts?");
+                            break;
+                        }
 
-                    if (nextElementHandle) {
-                        this.logger.info("Navigating to next post...");
-                        await (nextElementHandle as puppeteer.ElementHandle<Element>).click();
-                        await delay(3000 + Math.random() * 2000); // Wait for next post to load
-                    } else {
-                        this.logger.warn("Next arrow not found. Reached end of available posts?");
+                    } catch (e: any) {
+                        if (e.message && e.message.includes('detached')) {
+                            this.logger.warn(`Frame detached during navigation (likely page reload). Stopping session safely.`);
+                        } else {
+                            this.logger.warn(`Error navigating to next post: ${e.message}`);
+                        }
                         break;
                     }
-
                 } catch (e) {
-                    this.logger.warn(`Error navigating to next post: ${e}`);
-                    break;
+                    /* ignoring outer try error */
                 }
             }
 
