@@ -76,8 +76,29 @@ export class IgClient {
             launchArgs.push(`--proxy-server=${this.proxy}`);
         }
 
+        // Check for Linux/ARM (Raspberry Pi) compatibility to avoid "ELF not found" (Architecture Mismatch)
+        let executablePath: string | undefined;
+        if (process.platform === 'linux') {
+            try {
+                // Common paths for Chromium on Raspberry Pi / Linux
+                const commonPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome-stable'];
+                for (const p of commonPaths) {
+                    try {
+                        // We use fs.stat (async) to check existence to avoid blocking or sync import issues
+                        await fs.access(p); // properties of fs depends on import
+                        executablePath = p;
+                        this.logger.info(`Detected Linux system browser, using: ${p}`);
+                        break;
+                    } catch (e) { /* ignore */ }
+                }
+            } catch (e) {
+                // Fallback to default
+            }
+        }
+
         const launchOptions: any = {
             headless: false,
+            executablePath: executablePath || undefined, // Use system browser on Linux if found
             args: launchArgs,
             defaultViewport: null, // Ensure viewport matches window
             protocolTimeout: 180000, // Increase timeout to 3 minutes to prevent Runtime.callFunctionOn timeouts
