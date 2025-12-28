@@ -3,37 +3,49 @@ import path from 'path';
 import logger from '../config/logger';
 
 /**
- * Kills any chrome.exe process that is using the specified userDataDir.
- * This is crucial for cleaning up zombie processes on Windows that hold file locks.
+ * Kills any chrome.exe (Windows) or chromium (Linux) process that is using the specified userDataDir.
+ * This is crucial for cleaning up zombie processes that hold file locks.
  * 
  * @param userDataDir The absolute or relative path to the user data directory
  */
 export const killChromeProcessByProfile = async (userDataDir: string): Promise<void> => {
     return new Promise((resolve) => {
-        // Resolve absolute path to ensure matching correctness
         const absolutePath = path.resolve(process.cwd(), userDataDir);
-
-        // Escape backslashes for WQL (Windows Query Language)
-        // In WQL, backslashes usually need to be escaped, but for 'like' queries it can be tricky.
-        // We will try to match the directory name or a significant part of the path.
-        // Safest is to match the folder name if it's unique enough (like profile ID).
         const profileFolder = path.basename(absolutePath);
+        const platform = process.platform;
 
-        // WMIC command to find and delete processes
-        // wmic process where "name='chrome.exe' and commandline like '%<folder>%'" delete
-        const command = `wmic process where "name='chrome.exe' and commandline like '%${profileFolder}%'" delete`;
+        let command = '';
 
-        // logger.info(`Attempting to kill zombie Chrome processes for profile: ${profileFolder}`);
+        if (platform === 'win32') {
+            // WMIC command for Windows
+            // wmic process where "name='chrome.exe' and commandline like '%<folder>%'" delete
+            command = `wmic process where "name='chrome.exe' and commandline like '%${profileFolder}%'" delete`;
+        } else if (platform === 'linux') {
+            // pkill for Linux (Raspbian) - matches against full command line with -f
+            // We look for any process with the profile folder in its arguments
+            command = `pkill -f "${profileFolder}"`;
+        } else {
+            // macOS (darwin) or other: not fully implemented yet, just resolve
+            return resolve();
+        }
 
         exec(command, (error, stdout, stderr) => {
             if (error) {
-                // Error code 2147749891 usually means "No Instance(s) Available" (no process found), which is good.
-                // We only log real errors.
-                if (!error.message.includes('No Instance(s) Available') && !stderr.includes('No Instance(s) Available')) {
-                    // logger.warn(`Kill process command failed (might be already dead): ${error.message}`);
+                // Ignore "process not found" errors
+                // Windows: 2147749891 or "No Instance(s) Available"
+                // Linux: code 1 means no processes matched
+                const isNoProcess =
+                    (platform === 'win32' && (error.message.includes('No Instance(s) Available') || stderr.includes('No Instance(s) Available'))) ||
+                    (platform === 'linux' && error.code === 1);
+
+                if (!isNoProcess) {
+                    // logger.warn(`Kill process command failed (${platform}): ${error.message}`);
                 }
             } else {
-                if (stdout.includes('Instance deletion successful')) {
+                if (platform === 'win32' && stdout.includes('Instance deletion successful')) {
+                    logger.warn(`Forcefully killed zombie Chrome process for profile: ${profileFolder}`);
+                } else if (platform === 'linux') {
+                    // pkill is silent on success usually
                     logger.warn(`Forcefully killed zombie Chrome process for profile: ${profileFolder}`);
                 }
             }

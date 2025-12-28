@@ -797,6 +797,36 @@ export class IgClient {
         }
     }
 
+    /**
+     * Simulates a human-like click by moving the mouse to the element first,
+     * hesitating, and then triggering the click via JS to avoid protocol timeouts.
+     */
+    private async humanLikeClick(element: puppeteer.ElementHandle<Element>) {
+        try {
+            // 1. Get Element Position
+            const box = await element.boundingBox();
+            if (box && this.page) {
+                // 2. Move Mouse to target with randomization (Human behavior)
+                // Add some randomness to the exact click point within the element
+                const x = box.x + (box.width / 2) + ((Math.random() - 0.5) * (box.width / 4));
+                const y = box.y + (box.height / 2) + ((Math.random() - 0.5) * (box.height / 4));
+
+                // Move the mouse visually (server sees this mouse event)
+                await this.page.mouse.move(x, y, { steps: 5 + Math.floor(Math.random() * 10) });
+
+                // 3. Hesitate (Simulate reaction time)
+                await delay(150 + Math.random() * 300);
+            }
+        } catch (e) {
+            // If bounding box calculation fails, we just proceed to the click as fallback
+        }
+
+        // 4. Perform the click using JS Evaluate
+        // We use evaluate() instead of element.click() because the latter often causes
+        // "ProtocolError: Runtime.callFunctionOn timed out" on heavy pages or with stealth plugins.
+        await element.evaluate((el: Element) => (el as HTMLElement).click());
+    }
+
     async interactWithPosts(options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
         limits?: { likesPerHour?: number; commentsPerHour?: number; }
@@ -898,7 +928,9 @@ export class IgClient {
                         try {
                             const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
                             if (isConnected) {
-                                await likeButton.click().catch(err => console.warn(`Failed to click like button: ${err}`));
+                                // Use human-like safe click (Move -> Delay -> JS Click)
+                                await this.humanLikeClick(likeButton as puppeteer.ElementHandle<Element>)
+                                    .catch(err => console.warn(`Failed to click like button: ${err}`));
                                 await delay(500 + Math.random() * 500); // Small random delay
                                 console.log(`Post ${postIndex} liked.`);
                                 activityTracker.trackAction('likes');
@@ -937,7 +969,7 @@ export class IgClient {
                         const isConnected = await moreLink.evaluate(el => el.isConnected);
                         if (isConnected) {
                             console.log(`Expanding caption for post ${postIndex}...`);
-                            await moreLink.click().catch(e => console.warn("Failed to click 'more' link (ignored):", e));
+                            await this.humanLikeClick(moreLink as puppeteer.ElementHandle<Element>).catch(e => console.warn("Failed to click 'more' link (ignored):", e));
                             await delay(500); // Wait for expansion
                             const expandedCaption = await captionElement.evaluate((el) => (el as HTMLElement).innerText).catch(() => caption); // Fallback to original
                             console.log(
