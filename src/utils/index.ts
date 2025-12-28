@@ -27,7 +27,7 @@ export async function Instagram_cookiesExist(): Promise<boolean> {
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      logger.warn("Cookies file does not exist.");
+      // Valid state: No legacy cookies file found.
       return false;
     }
     logger.error("Error checking cookies:", error);
