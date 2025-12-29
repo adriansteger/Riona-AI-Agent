@@ -69,6 +69,9 @@ export class IgClient {
             '--disable-ipc-flooding-protection',
             '--disable-features=IsolateOrigins,site-per-process',
             '--disable-renderer-backgrounding',
+            // Prevent Chrome from pausing when minimized/backgrounded
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
             '--enable-features=NetworkService,NetworkServiceInProcess'
         ];
 
