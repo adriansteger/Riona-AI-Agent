@@ -250,26 +250,46 @@ export class IgClient {
                 } catch (e) { this.logger.warn(`Ignored error during popup check: ${e}`); }
 
                 try {
-                    await this.handleAutomatedBehaviorWarning(); // Check for "Automated Behavior" warning
+                    this.logger.info("DEBUG: Checking Automated Behavior Warning...");
+                    await this.handleAutomatedBehaviorWarning();
+                    this.logger.info("DEBUG: Done Automated Behavior Warning.");
                 } catch (e) { this.logger.warn(`Ignored error during warning check: ${e}`); }
 
                 // Check for "Not Now" button (e.g. Save Info, Try New Look, etc.)
                 try {
-                    const notNowButton = await this.page.evaluateHandle(() => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        return buttons.find(b => b.textContent === 'Not Now') || null;
-                    });
-                    const notNowButtonHandle = notNowButton.asElement();
-                    if (notNowButtonHandle) {
-                        this.logger.info("Found 'Not Now' button on restored session. Clicking...");
-                        await notNowButtonHandle.evaluate((b: any) => b.click());
-                        await delay(2000);
-                    }
+                    this.logger.info("DEBUG: Checking 'Not Now' button...");
+                    // Wrap in timeout to prevent hang
+                    await Promise.race([
+                        (async () => {
+                            const notNowButton = await this.page.evaluateHandle(() => {
+                                const buttons = Array.from(document.querySelectorAll('button'));
+                                return buttons.find(b => b.textContent === 'Not Now') || null;
+                            });
+                            const notNowButtonHandle = notNowButton.asElement();
+                            if (notNowButtonHandle) {
+                                this.logger.info("Found 'Not Now' button on restored session. Clicking...");
+                                await notNowButtonHandle.evaluate((b: any) => b.click());
+                                await delay(2000);
+                            }
+                        })(),
+                        new Promise(resolve => setTimeout(resolve, 3000))
+                    ]);
+                    this.logger.info("DEBUG: Done 'Not Now' button check.");
                 } catch (e) {
                     this.logger.warn(`Ignored error during 'Not Now' check (possible frame detach): ${e}`);
                 }
 
-                await this.page.screenshot({ path: 'logs/debug_session_restored.png' });
+                try {
+                    this.logger.info("DEBUG: Taking debug screenshot...");
+                    // Screenshot can hang on minimized windows
+                    await Promise.race([
+                        this.page.screenshot({ path: 'logs/debug_session_restored.png' }),
+                        new Promise(resolve => setTimeout(resolve, 5000))
+                    ]);
+                    this.logger.info("DEBUG: Done screenshot.");
+                } catch (e) {
+                    this.logger.warn("Screenshot failed (likely due to minimized window), skipping.");
+                }
             }
         } else {
             await this.loginWithCredentials();
