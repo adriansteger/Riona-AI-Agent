@@ -452,10 +452,17 @@ export class IgClient {
         if (!this.page) return;
         try {
             // Check for the specific warning text
-            const warningDetected = await this.page.evaluate(() => {
-                return document.body.innerText.includes('We suspect automated behavior') ||
-                    document.body.innerText.includes('prevent your account from being temporarily restricted');
-            });
+            // Check for the specific warning text (Optimized to avoid full body read hang)
+            const warningDetected = await Promise.race([
+                this.page.evaluate(() => {
+                    const errorHeaders = Array.from(document.querySelectorAll('h2, h3, h1, div[role="dialog"]'));
+                    return errorHeaders.some(el =>
+                        el.textContent?.includes('We suspect automated behavior') ||
+                        el.textContent?.includes('prevent your account from being temporarily restricted')
+                    );
+                }),
+                new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2000)) // 2s timeout
+            ]);
 
             if (warningDetected) {
                 this.logger.warn("DETECTED: 'Suspected Automated Behavior' Warning!");
