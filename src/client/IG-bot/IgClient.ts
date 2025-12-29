@@ -261,6 +261,7 @@ export class IgClient {
                     // Wrap in timeout to prevent hang
                     await Promise.race([
                         (async () => {
+                            if (!this.page) return;
                             const notNowButton = await this.page.evaluateHandle(() => {
                                 const buttons = Array.from(document.querySelectorAll('button'));
                                 return buttons.find(b => b.textContent === 'Not Now') || null;
