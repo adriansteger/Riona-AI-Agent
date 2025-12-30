@@ -1,0 +1,29 @@
+{
+    "jobBots": [
+        {
+            "id": "job_bot_main",
+            "enabled": true,
+            "preferences": {
+                "keywords": [
+                    "Software Engineer",
+                    "TypeScript",
+                    "Remote"
+                ],
+                "location": "Remote",
+                "platforms": [
+                    "indeed",
+                    "ziprecruiter",
+                    "weworkremotely"
+                ]
+            },
+            "emailConfig": {
+                "host": "ascotech.ch",
+                "port": 587,
+                "secure": true,
+                "user": "jobbot@ascotech.ch",
+                "pass": "22fZ8m$2s",
+                "to": "asco54@gmail.com"
+            }
+        }
+    ]
+}

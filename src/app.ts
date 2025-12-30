@@ -18,6 +18,9 @@ import { IgClient } from "./client/IG-bot/IgClient";
 import accountConfig from "./config/accounts.json";
 import { createAccountLogger } from "./config/logger";
 import { chooseCharacter } from "./Agent";
+import jobConfig from "./config/job_accounts.json";
+import { JobClient } from "./client/JobBot/JobClient";
+import { EmailService } from "./services/EmailService";
 
 // Set up process-level error handlers
 setupErrorHandlers();
@@ -77,13 +80,18 @@ const runInstagram = async () => {
   logger.info("Starting Multi-Account Instagram Bot...");
 
   // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
+  // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
   const accounts: any[] = accountConfig;
+  const enabledAccounts = accounts.filter(a => a.enabled);
 
-  for (const account of accounts) {
-    if (!account.enabled) {
-      logger.info(`Skipping disabled account: ${account.id}`);
-      continue;
-    }
+  if (enabledAccounts.length === 0) {
+    logger.info("No enabled Instagram accounts found. Skipping Instagram Bot.");
+    return;
+  }
+
+  logger.info(`Found ${enabledAccounts.length} enabled Instagram accounts: ${enabledAccounts.map(a => a.id).join(', ')}`);
+
+  for (const account of enabledAccounts) {
 
     const accountLogger = createAccountLogger(account.id);
     accountLogger.info(`>>> Starting session for account: ${account.id} (${account.username}) <<<`);
@@ -196,8 +204,36 @@ const runAgents = async () => {
     // await githubMain();
     // logger.info("GitHub agent finished.");
 
+    logger.info("Starting Job Bot...");
+    await runJobBot();
+    logger.info("Job Bot finished.");
+
     // Wait for 30 seconds before next iteration
     await new Promise((resolve) => setTimeout(resolve, 30000));
+  }
+};
+
+const runJobBot = async () => {
+  logger.info("Starting Job Search Bot...");
+
+  // Cast to any to handle potential JSON import strictness
+  const jobs = (jobConfig as any).jobBots || [];
+
+  for (const job of jobs) {
+    if (!job.enabled) continue;
+
+    logger.info(`Running Job Bot: ${job.id}`);
+    try {
+      const emailService = new EmailService(job.emailConfig);
+      const client = new JobClient(emailService, job.preferences);
+
+      await client.init();
+      await client.runSearch();
+      await client.close();
+
+    } catch (error) {
+      logger.error(`Error in Job Bot ${job.id}: ${error}`);
+    }
   }
 };
 
