@@ -90,10 +90,15 @@ export class JobClient {
                 // Keep browser alive and active even when minimized/backgrounded
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding'
+                '--disable-renderer-backgrounding',
+                // Prevent site isolation crashes
+                '--disable-features=IsolateOrigins,site-per-process',
             ],
             ignoreHTTPSErrors: true
         } as any);
+
+        const apiKey = process.env.RESUMATE_API_TOKEN || "MISSING";
+        logger.info(`Loaded ResuMate API Key: ${apiKey.substring(0, 5)}...`);
 
         this.browser.on('disconnected', () => {
             logger.warn("Browser disconnected/closed unexpectedly.");
