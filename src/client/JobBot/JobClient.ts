@@ -40,6 +40,34 @@ export class JobClient {
         this.config = config;
         this.analyzer = new JobAnalyzer();
         this.history = new JobHistory();
+
+        // Check ResuMate connection eagerly (don't await in constructor)
+        this.checkUserPreferences().catch(err => logger.warn(`ResuMate Check Failed: ${err.message}`));
+    }
+
+    private async checkUserPreferences() {
+        const apiUrl = process.env.RESUMATE_API_URL;
+        const apiKey = process.env.RESUMATE_API_TOKEN; // Using existing env var name for now
+
+        if (!apiUrl || !apiKey) return;
+
+        try {
+            // Construct user-preferences URL: [API_URL]/../user-preferences
+            // Assuming API_URL ends in /api/jobs, we want /api/user-preferences
+            const prefsUrl = apiUrl.replace('/jobs', '/user-preferences');
+
+            logger.info("Checking ResuMate User Preferences...");
+            const response = await axios.get(prefsUrl, {
+                headers: { 'x-api-key': apiKey }
+            });
+
+            if (response.data?.success) {
+                const { firstName, tier } = response.data.data;
+                logger.info(`ResuMate Connected: Hello ${firstName} (${tier} tier)`);
+            }
+        } catch (error: any) {
+            logger.warn(`Failed to fetch ResuMate preferences: ${error.message}`);
+        }
     }
 
     async init() {
@@ -383,7 +411,7 @@ export class JobClient {
             await axios.post(apiUrl, payload, {
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiToken}`
+                    'x-api-key': apiToken
                 }
             });
 
