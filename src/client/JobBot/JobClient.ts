@@ -45,36 +45,10 @@ export class JobClient {
         this.analyzer = new JobAnalyzer();
         this.history = new JobHistory();
 
-        // Check ResuMate connection eagerly (don't await in constructor)
-        this.checkUserPreferences().catch(err => logger.warn(`ResuMate Check Failed: ${err.message}`));
+
     }
 
-    private async checkUserPreferences(): Promise<any> {
-        const apiUrl = process.env.RESUMATE_API_URL;
-        const apiKey = process.env.RESUMATE_API_TOKEN; // Using existing env var name for now
 
-        if (!apiUrl || !apiKey) return null;
-
-        try {
-            // Construct user-preferences URL: [API_URL]/../user-preferences
-            // Assuming API_URL ends in /api/jobs, we want /api/user-preferences
-            const prefsUrl = apiUrl.replace('/jobs', '/user-preferences');
-
-            logger.info("Checking ResuMate User Preferences...");
-            const response = await axios.get(prefsUrl, {
-                headers: { 'x-api-key': apiKey }
-            });
-
-            if (response.data?.success) {
-                const { firstName, tier, email, preferences } = response.data.data;
-                logger.info(`ResuMate Connected: Hello ${firstName} (${tier} tier)`);
-                return { ...preferences, email }; // Return email with prefs
-            }
-        } catch (error: any) {
-            logger.warn(`Failed to fetch ResuMate preferences: ${error.message}`);
-        }
-        return null;
-    }
 
     async init() {
         if (this.browser && this.browser.isConnected()) return;
@@ -176,6 +150,30 @@ export class JobClient {
         this.currentTargetUserId = null;
         this.config = this.originalConfig;
         logger.info(">>> CENTRAL SERVICE LOOP COMPLETED <<<");
+    }
+
+    private async fetchProUsers(): Promise<any[]> {
+        const apiUrl = process.env.RESUMATE_API_URL;
+        const apiKey = process.env.RESUMATE_API_TOKEN;
+
+        if (!apiUrl || !apiKey) return [];
+
+        try {
+            // Endpoint: [API_URL]/../admin/pro-users
+            const adminUrl = apiUrl.replace('/jobs', '/admin/pro-users');
+
+            logger.info(`Fetching User Queue from: ${adminUrl}`);
+            const response = await axios.get(adminUrl, {
+                headers: { 'x-api-key': apiKey }
+            });
+
+            if (response.data?.success && Array.isArray(response.data.users)) {
+                return response.data.users;
+            }
+        } catch (error: any) {
+            logger.error(`Failed to fetch User Queue: ${error.message}`);
+        }
+        return [];
     }
 
     private async executeSearchLoop() {
@@ -542,29 +540,5 @@ export class JobClient {
         }
     }
 
-    private async fetchProUsers(): Promise<any[]> {
-        const apiUrl = process.env.RESUMATE_API_URL;
-        const apiKey = process.env.RESUMATE_API_TOKEN;
 
-        if (!apiUrl || !apiKey) return [];
-
-        try {
-            // Endpoint: [API_URL]/../admin/pro-users
-            const adminUrl = apiUrl.replace('/jobs', '/admin/pro-users');
-
-            logger.info("Checking for Admin Service Queue...");
-            const response = await axios.get(adminUrl, {
-                headers: { 'x-api-key': apiKey }
-            });
-
-            if (response.data?.success && Array.isArray(response.data.users)) {
-                return response.data.users;
-            }
-            return [];
-        } catch (error: any) {
-            // 403 or 401 just means we are not an admin or key is invalid/standard tier
-            // So we silently fallback to empty list
-            return [];
-        }
-    }
 }
