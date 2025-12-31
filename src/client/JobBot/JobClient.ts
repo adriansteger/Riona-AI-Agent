@@ -48,11 +48,11 @@ export class JobClient {
         this.checkUserPreferences().catch(err => logger.warn(`ResuMate Check Failed: ${err.message}`));
     }
 
-    private async checkUserPreferences() {
+    private async checkUserPreferences(): Promise<any> {
         const apiUrl = process.env.RESUMATE_API_URL;
         const apiKey = process.env.RESUMATE_API_TOKEN; // Using existing env var name for now
 
-        if (!apiUrl || !apiKey) return;
+        if (!apiUrl || !apiKey) return null;
 
         try {
             // Construct user-preferences URL: [API_URL]/../user-preferences
@@ -65,12 +65,14 @@ export class JobClient {
             });
 
             if (response.data?.success) {
-                const { firstName, tier } = response.data.data;
+                const { firstName, tier, email, preferences } = response.data.data;
                 logger.info(`ResuMate Connected: Hello ${firstName} (${tier} tier)`);
+                return { ...preferences, email }; // Return email with prefs
             }
         } catch (error: any) {
             logger.warn(`Failed to fetch ResuMate preferences: ${error.message}`);
         }
+        return null;
     }
 
     async init() {
@@ -160,6 +162,32 @@ export class JobClient {
         } else {
             // --- Personal Mode ---
             logger.info(`>>> PERSONAL MODE: No Pro Users queue. Running local config. <<<`);
+
+            // Sync with online preferences if available
+            // Sync with online preferences if available
+            const onlinePrefs = await this.checkUserPreferences();
+            if (!onlinePrefs) {
+                logger.warn(">>> ABORTING: Could not fetch preferences from ResuMate API. <<<");
+                logger.warn("Check your API Key, Connection, or ResuMate Profile.");
+                return;
+            }
+
+            logger.info(">>> Syncing configuration with ResuMate Profile... <<<");
+
+            // Update Recipient Email
+            if (onlinePrefs.email) {
+                this.emailService.setRecipient(onlinePrefs.email);
+            }
+
+            if (onlinePrefs.title) {
+                this.config.keywords = [onlinePrefs.title];
+                logger.info(`   Keywords set to: ${this.config.keywords}`);
+            }
+            if (onlinePrefs.location) {
+                this.config.location = onlinePrefs.location;
+                logger.info(`   Location set to: ${this.config.location}`);
+            }
+
             await this.executeSearchLoop();
         }
     }

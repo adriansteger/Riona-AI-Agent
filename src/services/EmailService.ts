@@ -59,4 +59,8 @@ export class EmailService {
             logger.error(`Failed to send email alert: ${error}`);
         }
     }
+    setRecipient(email: string) {
+        this.config.to = email;
+        logger.info(`Email recipient updated to: ${email}`);
+    }
 }

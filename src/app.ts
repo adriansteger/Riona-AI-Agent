@@ -18,7 +18,7 @@ import { IgClient } from "./client/IG-bot/IgClient";
 import accountConfig from "./config/accounts.json";
 import { createAccountLogger } from "./config/logger";
 import { chooseCharacter } from "./Agent";
-import jobConfig from "./config/job_accounts.json";
+
 import { JobClient } from "./client/JobBot/JobClient";
 import { EmailService } from "./services/EmailService";
 
@@ -214,26 +214,41 @@ const runAgents = async () => {
 };
 
 const runJobBot = async () => {
-  logger.info("Starting Job Search Bot...");
+  logger.info("Starting Job Search Bot (Env/API Config)...");
 
-  // Cast to any to handle potential JSON import strictness
-  const jobs = (jobConfig as any).jobBots || [];
+  // Email Config from Env
+  const emailConfig = {
+    host: process.env.EMAIL_HOST || '',
+    port: parseInt(process.env.EMAIL_PORT || '465'),
+    secure: process.env.EMAIL_SECURE === 'true',
+    user: process.env.EMAIL_USER || '',
+    pass: process.env.EMAIL_PASS || '',
+    to: '', // Will be set dynamically by JobClient -> checkUserPreferences
+  };
 
-  for (const job of jobs) {
-    if (!job.enabled) continue;
+  if (!emailConfig.user || !emailConfig.pass) {
+    logger.warn("Missing EMAIL_USER or EMAIL_PASS in .env. Skipping Job Bot.");
+    return;
+  }
 
-    logger.info(`Running Job Bot: ${job.id}`);
-    try {
-      const emailService = new EmailService(job.emailConfig);
-      const client = new JobClient(emailService, job.preferences);
+  try {
+    const emailService = new EmailService(emailConfig);
 
-      await client.init();
-      await client.runSearch();
-      await client.close();
+    // Default config (will be overridden by ResuMate API)
+    const defaultJobConfig = {
+      keywords: [],
+      location: 'Remote',
+      platforms: ['indeed', 'ziprecruiter', 'weworkremotely']
+    };
 
-    } catch (error) {
-      logger.error(`Error in Job Bot ${job.id}: ${error}`);
-    }
+    const client = new JobClient(emailService, defaultJobConfig);
+
+    await client.init();
+    await client.runSearch();
+    await client.close();
+
+  } catch (error) {
+    logger.error(`Error in Job Bot: ${error}`);
   }
 };
 
