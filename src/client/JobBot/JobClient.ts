@@ -34,10 +34,13 @@ export class JobClient {
     private analyzer: JobAnalyzer;
     private history: JobHistory;
     private config: JobConfig;
+    private currentTargetUserId: string | null = null;
+    private originalConfig: JobConfig;
 
     constructor(emailService: EmailService, config: JobConfig) {
         this.emailService = emailService;
         this.config = config;
+        this.originalConfig = { ...config }; // Backup original config
         this.analyzer = new JobAnalyzer();
         this.history = new JobHistory();
 
@@ -91,8 +94,6 @@ export class JobClient {
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding',
-                // Prevent site isolation crashes
-                '--disable-features=IsolateOrigins,site-per-process',
             ],
             ignoreHTTPSErrors: true
         } as any);
@@ -102,6 +103,8 @@ export class JobClient {
 
         this.browser.on('disconnected', () => {
             logger.warn("Browser disconnected/closed unexpectedly.");
+            this.browser = null;
+            this.page = null;
         });
 
         this.page = await this.browser.newPage();
@@ -130,6 +133,38 @@ export class JobClient {
     }
 
     async runSearch() {
+        // --- Admin Workflow ---
+        const proUsers = await this.fetchProUsers();
+
+        if (proUsers && proUsers.length > 0) {
+            logger.info(`>>> ADMIN MODE: Found ${proUsers.length} Pro Users. Running Service Loop. <<<`);
+
+            for (const user of proUsers) {
+                logger.info(`\n=== Processing User: ${user.name} (${user.id}) ===`);
+                this.currentTargetUserId = user.id;
+
+                // Map preferences to config
+                // Default to original platforms if not specified
+                this.config = {
+                    keywords: user.preferences.title ? [user.preferences.title] : this.originalConfig.keywords,
+                    location: user.preferences.location || this.originalConfig.location,
+                    platforms: this.originalConfig.platforms
+                };
+
+                await this.executeSearchLoop();
+            }
+            // Reset
+            this.currentTargetUserId = null;
+            this.config = this.originalConfig;
+
+        } else {
+            // --- Personal Mode ---
+            logger.info(`>>> PERSONAL MODE: No Pro Users queue. Running local config. <<<`);
+            await this.executeSearchLoop();
+        }
+    }
+
+    private async executeSearchLoop() {
         const locations = Array.isArray(this.config.location) ? this.config.location : [this.config.location];
 
         for (const location of locations) {
@@ -176,11 +211,11 @@ export class JobClient {
 
             // Deep Scrape: Visit the job page to get the description
             logger.info(`Visiting job page for details: ${job.title}...`);
-            const description = await this.scrapeJobDetails(job.url, platform);
+            const details = await this.scrapeJobDetails(job.url, platform);
 
             // AI Analysis with FULL description
             logger.info(`Analyzing job with AI...`);
-            const analysis = await this.analyzer.analyzeJob(job.title, job.company, description);
+            const analysis = await this.analyzer.analyzeJob(job.title, job.company, details.description);
 
             if (analysis.isRelevant) {
                 logger.info(`Job Match! Score: ${analysis.score}. Sending email.`);
@@ -192,7 +227,7 @@ export class JobClient {
                 );
 
                 // --- ResuMate Integration ---
-                await this.postToResuMate(job, description, platform, analysis.score);
+                await this.postToResuMate(job, details, platform, analysis.score);
 
                 this.history.addProcessed(job.url);
             } else {
@@ -202,9 +237,10 @@ export class JobClient {
         }
     }
 
-    private async scrapeJobDetails(url: string, platform: string): Promise<string> {
+    private async scrapeJobDetails(url: string, platform: string): Promise<{ description: string, salary?: string, location?: string, pensum?: string }> {
         let detailsPage: any;
         try {
+            await this.ensureBrowser(); // Ensure browser is alive
             detailsPage = await this.browser.newPage();
             // Random reliable UA
             await detailsPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -212,23 +248,57 @@ export class JobClient {
 
             await new Promise(r => setTimeout(r, 2000)); // Human pause reading
 
-            const description = await detailsPage.evaluate((platform: string) => {
-                let selector = '';
-                if (platform === 'indeed') selector = '#jobDescriptionText';
-                else if (platform === 'ziprecruiter') selector = '.job_description, .job_content';
-                else if (platform === 'weworkremotely') selector = '.listing-container';
+            const data = await detailsPage.evaluate((platform: string) => {
+                let descSelector = '';
+                let salarySelector = '';
+                let locSelector = '';
+                let pensumSelector = '';
 
-                const el = document.querySelector(selector);
-                return el ? el.textContent?.trim().substring(0, 3000) : ''; // Limit length for token saving
+                if (platform === 'indeed') {
+                    descSelector = '#jobDescriptionText';
+                    salarySelector = '#salaryInfoAndJobType, .salary-snippet-container';
+                    locSelector = '[data-testid="inlineHeader-companyLocation"], .jobsearch-JobInfoHeader-subtitle > div:last-child';
+                    pensumSelector = '#salaryInfoAndJobType > span:nth-child(2), [data-testid="job-type"]'; // heuristic
+                }
+                else if (platform === 'ziprecruiter') {
+                    descSelector = '.job_description, .job_content';
+                    salarySelector = '.salary_text';
+                    pensumSelector = '.job_details .employment_type';
+                }
+                else if (platform === 'weworkremotely') {
+                    descSelector = '.listing-container';
+                    pensumSelector = '.listing-header-container .listing-tag'; // often contains "Full-Time"
+                }
+
+                const descEl = document.querySelector(descSelector);
+                const salaryEl = salarySelector ? document.querySelector(salarySelector) : null;
+                const locEl = locSelector ? document.querySelector(locSelector) : null;
+                const pensumEl = pensumSelector ? document.querySelector(pensumSelector) : null;
+
+                // Cleanup pensum text (remove dashes etc)
+                let pensumRaw = pensumEl ? pensumEl.textContent?.trim() : undefined;
+                if (pensumRaw && pensumRaw.startsWith('-')) pensumRaw = pensumRaw.substring(1).trim();
+
+                return {
+                    description: descEl ? descEl.textContent?.trim().substring(0, 5000) || '' : '',
+                    salary: salaryEl ? salaryEl.textContent?.trim() : undefined,
+                    location: locEl ? locEl.textContent?.trim() : undefined,
+                    pensum: pensumRaw
+                };
             }, platform);
 
             await detailsPage.close();
-            return description || "No description found.";
+            return {
+                description: data.description || "No description found.",
+                salary: data.salary,
+                location: data.location,
+                pensum: data.pensum
+            };
 
         } catch (error) {
             logger.warn(`Failed to scrape details for ${url}: ${error}`);
             if (detailsPage && !detailsPage.isClosed()) await detailsPage.close();
-            return "Failed to scrape description.";
+            return { description: "Failed to scrape description." };
         }
     }
 
@@ -375,7 +445,7 @@ export class JobClient {
             return results;
         });
     }
-    private async postToResuMate(job: JobData, description: string, platform: string, score: number) {
+    private async postToResuMate(job: JobData, details: { description: string, salary?: string, location?: string, pensum?: string }, platform: string, score: number) {
         try {
             const apiUrl = process.env.RESUMATE_API_URL;
             const apiToken = process.env.RESUMATE_API_TOKEN;
@@ -390,28 +460,39 @@ export class JobClient {
             const phoneRegex = /(?:\+?\d{1,3}[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}/g;
             const salaryRegex = /(\$[\d,]+(?:\s*-\s*\$[\d,]+)?\s*(?:yr|year|hr|hour|mo|month)?)|(\d+k\s*-\s*\d+k)/i;
 
-            const emails = description.match(emailRegex) || [];
-            const phones = description.match(phoneRegex) || [];
-            const salaryMatch = description.match(salaryRegex);
-            const salary = salaryMatch ? salaryMatch[0] : null;
+            const emails = details.description.match(emailRegex) || [];
+            const phones = details.description.match(phoneRegex) || [];
 
-            // Simple location extraction fallback
-            const defaultLocation = Array.isArray(this.config.location) ? this.config.location.join(', ') : this.config.location;
+            // Prefer explicitly scraped salary, fallback to regex
+            let salary = details.salary;
+            if (!salary) {
+                const salaryMatch = details.description.match(salaryRegex);
+                salary = salaryMatch ? salaryMatch[0] : undefined;
+            }
+
+            // Prefer explicitly scraped location, fallback to search config
+            const location = details.location || (Array.isArray(this.config.location) ? this.config.location.join(', ') : this.config.location);
 
             const payload = {
                 title: job.title,
                 company: job.company,
                 url: job.url,
-                location: defaultLocation,
-                description: description,
+                location: location,
+                description: details.description,
                 salary: salary,
+                pensum: details.pensum, // Added field
                 source: platform,
                 emails: [...new Set(emails)], // Deduplicate
                 phones: [...new Set(phones)],
-                aiScore: score
+                aiScore: score,
+                targetUserId: this.currentTargetUserId // Optional: for Admin Mode
             };
 
-            logger.info(`Sending job to ResuMate CRM: ${job.title} at ${job.company}`);
+            const logMsg = this.currentTargetUserId
+                ? `Sending job to ResuMate CRM (Target: ${this.currentTargetUserId}): ${job.title}`
+                : `Sending job to ResuMate CRM: ${job.title}`;
+
+            logger.info(logMsg);
 
             await axios.post(apiUrl, payload, {
                 headers: {
@@ -432,6 +513,32 @@ export class JobClient {
             } else {
                 logger.error(`Failed to post to ResuMate: ${error.message}`);
             }
+        }
+    }
+
+    private async fetchProUsers(): Promise<any[]> {
+        const apiUrl = process.env.RESUMATE_API_URL;
+        const apiKey = process.env.RESUMATE_API_TOKEN;
+
+        if (!apiUrl || !apiKey) return [];
+
+        try {
+            // Endpoint: [API_URL]/../admin/pro-users
+            const adminUrl = apiUrl.replace('/jobs', '/admin/pro-users');
+
+            logger.info("Checking for Admin Service Queue...");
+            const response = await axios.get(adminUrl, {
+                headers: { 'x-api-key': apiKey }
+            });
+
+            if (response.data?.success && Array.isArray(response.data.users)) {
+                return response.data.users;
+            }
+            return [];
+        } catch (error: any) {
+            // 403 or 401 just means we are not an admin or key is invalid/standard tier
+            // So we silently fallback to empty list
+            return [];
         }
     }
 }
