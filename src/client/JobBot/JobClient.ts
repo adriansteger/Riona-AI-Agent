@@ -18,6 +18,7 @@ interface JobConfig {
     keywords: string[];
     location: string | string[];
     platforms: string[];
+    pensum?: string; // Added for User Preferences
 }
 
 interface JobData {
@@ -135,61 +136,46 @@ export class JobClient {
     }
 
     async runSearch() {
-        // --- Admin Workflow ---
-        const proUsers = await this.fetchProUsers();
+        // --- Central Service / Admin Mode ---
+        logger.info(">>> STARTING CENTRAL SERVICE LOOP <<<");
+        const proUsers = await this.fetchProUsers(); // Fetch queue
 
-        if (proUsers && proUsers.length > 0) {
-            logger.info(`>>> ADMIN MODE: Found ${proUsers.length} Pro Users. Running Service Loop. <<<`);
+        if (!proUsers || proUsers.length === 0) {
+            logger.warn(">>> NO USERS IN QUEUE. Skipping search cycle. <<<");
+            return;
+        }
 
-            for (const user of proUsers) {
-                logger.info(`\n=== Processing User: ${user.name} (${user.id}) ===`);
-                this.currentTargetUserId = user.id;
+        logger.info(`>>> Processing ${proUsers.length} Users... <<<`);
 
-                // Map preferences to config
-                // Default to original platforms if not specified
-                this.config = {
-                    keywords: user.preferences.title ? [user.preferences.title] : this.originalConfig.keywords,
-                    location: user.preferences.location || this.originalConfig.location,
-                    platforms: this.originalConfig.platforms
-                };
+        for (const user of proUsers) {
+            logger.info(`\n=== Processing User: ${user.name} (${user.id}) ===`);
+            this.currentTargetUserId = user.id;
 
-                await this.executeSearchLoop();
-            }
-            // Reset
-            this.currentTargetUserId = null;
-            this.config = this.originalConfig;
+            // Map user preferences to config
+            // Priority: User Prefs > Default Config
+            const title = user.preferences?.title;
 
-        } else {
-            // --- Personal Mode ---
-            logger.info(`>>> PERSONAL MODE: No Pro Users queue. Running local config. <<<`);
-
-            // Sync with online preferences if available
-            // Sync with online preferences if available
-            const onlinePrefs = await this.checkUserPreferences();
-            if (!onlinePrefs) {
-                logger.warn(">>> ABORTING: Could not fetch preferences from ResuMate API. <<<");
-                logger.warn("Check your API Key, Connection, or ResuMate Profile.");
-                return;
+            if (!title) {
+                logger.warn(`   Skipping user ${user.name} - No Job Title defined.`);
+                continue;
             }
 
-            logger.info(">>> Syncing configuration with ResuMate Profile... <<<");
+            this.config = {
+                keywords: [title], // Strict title usage
+                location: user.preferences?.location || this.originalConfig.location,
+                platforms: this.originalConfig.platforms,
+                pensum: user.preferences?.pensum // Store pensum preference
+            };
 
-            // Update Recipient Email
-            if (onlinePrefs.email) {
-                this.emailService.setRecipient(onlinePrefs.email);
-            }
-
-            if (onlinePrefs.title) {
-                this.config.keywords = [onlinePrefs.title];
-                logger.info(`   Keywords set to: ${this.config.keywords}`);
-            }
-            if (onlinePrefs.location) {
-                this.config.location = onlinePrefs.location;
-                logger.info(`   Location set to: ${this.config.location}`);
-            }
+            logger.info(`   Target: ${this.config.keywords[0]} in ${this.config.location} (Pensum: ${this.config.pensum || 'Any'})`);
 
             await this.executeSearchLoop();
         }
+
+        // Reset
+        this.currentTargetUserId = null;
+        this.config = this.originalConfig;
+        logger.info(">>> CENTRAL SERVICE LOOP COMPLETED <<<");
     }
 
     private async executeSearchLoop() {
@@ -501,7 +487,7 @@ export class JobClient {
             // Prefer explicitly scraped location, fallback to search config
             const location = details.location || (Array.isArray(this.config.location) ? this.config.location.join(', ') : this.config.location);
 
-            const payload = {
+            const payload: any = {
                 title: job.title,
                 company: job.company,
                 url: job.url,
@@ -513,8 +499,20 @@ export class JobClient {
                 emails: [...new Set(emails)], // Deduplicate
                 phones: [...new Set(phones)],
                 aiScore: score,
-                targetUserId: this.currentTargetUserId // Optional: for Admin Mode
             };
+
+            if (this.currentTargetUserId) {
+                payload.targetUserId = this.currentTargetUserId;
+                logger.info(`   [Proxy Mode] Submitting for User ID: ${this.currentTargetUserId}`);
+            }
+
+            // Add Pensum if found
+            if (details.pensum) {
+                payload.pensum = details.pensum;
+            } else if (this.config.pensum) {
+                // Fallback to user preference pensum if extraction failed? 
+                // Or maybe just leave it empty. Let's send extracted only for accuracy.
+            }
 
             const logMsg = this.currentTargetUserId
                 ? `Sending job to ResuMate CRM (Target: ${this.currentTargetUserId}): ${job.title}`
