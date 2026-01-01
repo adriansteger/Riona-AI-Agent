@@ -113,7 +113,18 @@ export class IgClient {
             const absoluteUserDataDir = path.resolve(process.cwd(), this.userDataDir);
             launchOptions.userDataDir = absoluteUserDataDir;
             // Ensure directory exists
+            // Ensure directory exists
             await fs.mkdir(absoluteUserDataDir, { recursive: true }).catch(() => { });
+
+            // PROACTIVE CLEANUP: Kill any lingering Chrome processes for this profile BEFORE launching
+            // This prevents "multiple sessions" errors if the previous run didn't exit cleanly.
+            try {
+                this.logger.info("Proactively cleaning up any existing Chrome processes for this profile...");
+                await killChromeProcessByProfile(this.userDataDir);
+                await delay(2000); // Give it a moment to release locks
+            } catch (e: any) {
+                this.logger.warn(`Proactive cleanup failed (non-critical): ${e.message}`);
+            }
         }
 
         this.logger.info(`Launching browser with options: ${JSON.stringify({ ...launchOptions, args: launchOptions.args.map((a: string) => a.startsWith('--proxy-server') ? '--proxy-server=REDACTED' : a) }, null, 2)}`);
@@ -472,42 +483,93 @@ export class IgClient {
     private async handleAutomatedBehaviorWarning() {
         if (!this.page) return;
         try {
-            // Check for the specific warning text
-            // Check for the specific warning text (Optimized to avoid full body read hang)
+            const currentUrl = this.page.url();
+            const isChallengePage = currentUrl.includes('/challenge/');
+
+            if (isChallengePage) {
+                this.logger.warn(`DETECTED: Challenge Page Redirect (${currentUrl})`);
+            }
+
+            // Check for warning text - broadened scope
             const warningDetected = await Promise.race([
                 this.page.evaluate(() => {
-                    const errorHeaders = Array.from(document.querySelectorAll('h2, h3, h1, div[role="dialog"]'));
-                    return errorHeaders.some(el =>
+                    // Check headers and dialogs first (standard overlay)
+                    const errorHeaders = Array.from(document.querySelectorAll('h2, h3, h1, div[role="dialog"], p, span'));
+                    const hasText = errorHeaders.some(el =>
                         el.textContent?.includes('We suspect automated behavior') ||
                         el.textContent?.includes('prevent your account from being temporarily restricted')
                     );
+
+                    // Fallback: Check for the specific "Dismiss" button which implies the warning is present
+                    const hasDismissBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).some(b => b.textContent?.trim() === 'Dismiss');
+
+                    return hasText || hasDismissBtn;
                 }),
-                new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2000)) // 2s timeout
+                new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000)) // 3s timeout
             ]);
 
-            if (warningDetected) {
-                this.logger.warn("DETECTED: 'Suspected Automated Behavior' Warning!");
+            if (warningDetected || isChallengePage) {
+                this.logger.warn("CONFIRMED: 'Suspected Automated Behavior' Warning present.");
                 this.logger.info("Handling humanely: Simulating reading time...");
 
-                // 1. Simulate "Reading" the warning (User stops to read)
+                // 1. Simulate "Reading"
                 await delay(3000 + Math.random() * 4000);
 
-                // 2. Find and Click Dismiss
-                const dismissButton = await this.page.evaluateHandle(() => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    return buttons.find(b => b.textContent?.includes('Dismiss')) || null;
+                // 2. Find and Click Dismiss (Robust Search)
+                // We fetch specific element handles to inspect them
+                const dismissAction = await this.page.evaluateHandle(() => {
+                    // Collect all potential buttons
+                    const candidates = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
+
+                    // Priority 1: Exact Text Match (Case Insensitive)
+                    const exactMatch = candidates.find(b => {
+                        const txt = b.textContent?.trim().toLowerCase();
+                        return txt === 'dismiss' || txt === 'next' || txt === 'ok' || txt === 'continue';
+                    });
+                    if (exactMatch) return exactMatch;
+
+                    // Priority 2: Contains Text
+                    const partialMatch = candidates.find(b => {
+                        const txt = b.textContent?.trim().toLowerCase() || '';
+                        return txt.includes('dismiss');
+                    });
+                    if (partialMatch) return partialMatch;
+
+                    // Priority 3: Only one button on the page? (If we are on a dedicated challenge page)
+                    if (location.href.includes('/challenge/') && candidates.length > 0 && candidates.length < 3) {
+                        // Likely the action button if it's one of few
+                        return candidates[candidates.length - 1];
+                    }
+
+                    return null;
                 });
 
-                const dismissElement = dismissButton.asElement();
+                const dismissElement = dismissAction.asElement();
+
                 if (dismissElement) {
-                    this.logger.info("Found 'Dismiss' button. Clicking...");
+                    this.logger.info("Found 'Dismiss' (or equivalent) button. Clicking...");
+
+                    // Scroll into view just in case
+                    await dismissElement.evaluate(el => (el as Element).scrollIntoView());
+                    await delay(500);
+
                     await (dismissElement as puppeteer.ElementHandle<Element>).click();
 
-                    // 3. Post-Click "Hesitation"
-                    this.logger.info("Dismissed. Pausing for safety/hesitation...");
-                    await delay(2000 + Math.random() * 3000);
+                    // 3. Post-Click Pause
+                    this.logger.info("Dismissed. Pausing for safety...");
+                    await delay(3000 + Math.random() * 2000);
                 } else {
-                    this.logger.error("Warning detected but 'Dismiss' button NOT found.");
+                    this.logger.error("Warning detected but NO actionable button found.");
+
+                    // Capture Debug HTML
+                    const htmlSnapshot = await this.page.evaluate(() => document.body.innerHTML);
+                    this.logger.error(`Debug HTML Snapshot (First 1000 chars): ${htmlSnapshot.substring(0, 1000)}`);
+
+                    // If we are on a challenge page and can't dismiss, we might be stuck.
+                    if (isChallengePage) {
+                        this.logger.error("Stuck on Challenge page. Attempting force-navigation to Home...");
+                        await this.page.goto('https://www.instagram.com/', { waitUntil: 'networkidle2' });
+                    }
                 }
             }
         } catch (e) {
@@ -520,6 +582,8 @@ export class IgClient {
         console.log("Checking for notification popup...");
 
         try {
+            await this.handleWhatHappenedPopup(); // Check for "What happened" dialog first
+
             // Wait for the dialog to appear, with a timeout
             const dialogSelector = 'div[role="dialog"]';
             await this.page.waitForSelector(dialogSelector, { timeout: 5000 });
@@ -566,6 +630,44 @@ export class IgClient {
         } catch (error) {
             console.log("No notification popup appeared within the timeout period.");
             // If it times out, it means no popup, which is fine.
+        }
+    }
+
+    private async handleWhatHappenedPopup() {
+        if (!this.page) return;
+        try {
+            const whatHappenedDialog = await this.page.evaluateHandle(() => {
+                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                return dialogs.find(d => d.textContent?.includes('What happened') || d.textContent?.includes('You can no longer request a review')) || null;
+            });
+
+            const dialogElement = whatHappenedDialog.asElement();
+            if (dialogElement) {
+                this.logger.warn("DETECTED: 'What Happened' Restriction Dialog.");
+
+                // Try to find the close button (SVG X)
+                const closeButton = await dialogElement.evaluateHandle((d) => {
+                    const el = d as Element;
+                    const svgs = Array.from(el.querySelectorAll('svg'));
+                    // Look for aria-label Close or just the top-right typical position
+                    const closeSvg = svgs.find(s => s.getAttribute('aria-label') === 'Close');
+                    if (closeSvg) return closeSvg.closest('div[role="button"]') || closeSvg.parentElement || closeSvg;
+                    return null;
+                });
+
+                const closeBtnElement = closeButton.asElement();
+                if (closeBtnElement) {
+                    this.logger.info("Found Close button for 'What Happened' dialog. Clicking...");
+                    await closeBtnElement.evaluate((el) => (el as HTMLElement).click());
+                    await delay(2000);
+                    this.logger.info("Dismissed 'What Happened' dialog.");
+                } else {
+                    this.logger.error("Could not find Close button on 'What Happened' dialog. Taking generic click attempt on top-right...");
+                    // Fallback logic if needed, or just log
+                }
+            }
+        } catch (e) {
+            this.logger.warn(`Error handling 'What Happened' popup: ${e}`);
         }
     }
 

@@ -18,6 +18,7 @@ import { IgClient } from "./client/IG-bot/IgClient";
 import accountConfig from "./config/accounts.json";
 import { createAccountLogger } from "./config/logger";
 import { chooseCharacter } from "./Agent";
+import jobConfig from "./config/job_accounts.json";
 
 import { JobClient } from "./client/JobBot/JobClient";
 import { EmailService } from "./services/EmailService";
@@ -156,27 +157,31 @@ const runInstagram = async () => {
         proxy: account.proxy
       }, accountLogger);
 
-      await igClient.init();
+      try {
+        await igClient.init();
 
-      accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
-      accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
+        accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
+        accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
 
-      const hashtags = account.settings?.hashtags || [];
-      const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
+        const hashtags = account.settings?.hashtags || [];
+        const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
 
-      // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
-      const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
+        // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
+        const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
 
-      if (useHashtags) {
-        accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-        await igClient.interactWithHashtags(hashtags, { behavior, limits });
-      } else {
-        accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-        await igClient.interactWithPosts({ behavior, limits });
+        if (useHashtags) {
+          accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
+          await igClient.interactWithHashtags(hashtags, { behavior, limits });
+        } else {
+          accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
+          await igClient.interactWithPosts({ behavior, limits });
+        }
+      } catch (err) {
+        throw err; // Re-throw to be caught by outer catch for logging
+      } finally {
+        await igClient.close();
+        accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
       }
-
-      await igClient.close();
-      accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
 
     } catch (error) {
       accountLogger.error(`Error processing account ${account.id}: ${error}`);
@@ -214,6 +219,15 @@ const runAgents = async () => {
 };
 
 const runJobBot = async () => {
+  // Check if Job Bot is enabled in config
+  // We assume the first bot config controls the master switch for now, or check any enabled
+  const isEnabled = (jobConfig as any).jobBots?.some((bot: any) => bot.enabled);
+
+  if (!isEnabled) {
+    logger.info("Job Bot is disabled in job_accounts.json. Skipping.");
+    return;
+  }
+
   logger.info("Starting Job Search Bot (Env/API Config)...");
 
   // Email Config from Env

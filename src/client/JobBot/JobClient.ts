@@ -333,7 +333,7 @@ export class JobClient {
     private async searchIndeed(location: string) {
         logger.info(`Starting Indeed Job Search for ${location}...`);
         const query = this.config.keywords.join(' ');
-        const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}`;
+        const url = `https://ch.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}`;
 
         await this.page.goto(url, { waitUntil: 'domcontentloaded' });
         await new Promise(r => setTimeout(r, 3000));
