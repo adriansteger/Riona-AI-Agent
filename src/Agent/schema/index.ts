@@ -55,6 +55,50 @@ export const getInstagramCommentSchema = (): InstagramCommentSchema => {
   };
 };
 
+export interface InstagramDMResponseSchema {
+  description: string;
+  type: SchemaType;
+  items: {
+    type: SchemaType;
+    properties: {
+      response: {
+        type: SchemaType;
+        description: string;
+        nullable: boolean;
+      };
+      tone: {
+        type: SchemaType;
+        description: string;
+        nullable: boolean;
+      };
+    };
+    required: string[];
+  };
+}
+
+export const getInstagramDMResponseSchema = (): InstagramDMResponseSchema => {
+  return {
+    description: `Generates a natural, human-like response to a direct message.`,
+    type: SchemaType.ARRAY,
+    items: {
+      type: SchemaType.OBJECT,
+      properties: {
+        response: {
+          type: SchemaType.STRING,
+          description: "A friendly, engaging, and relevant response to the user's message. Keep it concise (1-2 sentences).",
+          nullable: false,
+        },
+        tone: {
+          type: SchemaType.STRING,
+          description: "The tone of the response (e.g., friendly, helpful, witty).",
+          nullable: false,
+        },
+      },
+      required: ["response", "tone"],
+    },
+  };
+};
+
 // Define the interface for the Tweet document
 interface ITweet extends Document {
   tweetContent: string;

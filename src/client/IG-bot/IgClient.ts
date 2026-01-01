@@ -9,7 +9,7 @@ import logger from "../../config/logger";
 import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile } from "../../utils";
 import { runAgent } from "../../Agent";
 import path from "path";
-import { getInstagramCommentSchema } from "../../Agent/schema";
+import { getInstagramCommentSchema, getInstagramDMResponseSchema } from "../../Agent/schema";
 import readline from "readline";
 import fs from "fs/promises";
 import { getShouldExitInteractions } from '../../api/agent';
@@ -33,16 +33,19 @@ export class IgClient {
     private userDataDir?: string;
     private proxy?: string;
     private logger: any; // Using any or specific Logger type if available
+    private character: any;
 
     constructor(
         config: { username?: string; password?: string; userDataDir?: string; proxy?: string },
-        loggerInstance?: any
+        loggerInstance?: any,
+        character?: any
     ) {
         this.username = config.username || '';
         this.password = config.password || '';
         this.userDataDir = config.userDataDir;
         this.proxy = config.proxy;
         this.logger = loggerInstance || logger;
+        this.character = character || {};
     }
 
     async init() {
@@ -750,6 +753,141 @@ export class IgClient {
         } catch (error) {
             logger.error(`Failed to send DM to ${username}`, error);
             throw error;
+        }
+    }
+
+
+
+    async checkAndRespondToDMs(limits?: { dmsPerHour?: number }) {
+        if (!this.page) throw new Error("Page not initialized");
+        const dmsPerHour = limits?.dmsPerHour || 5;
+        // Check local activity tracker here too if needed, but app.ts should handle high level
+        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const activityTracker = new ActivityTracker(accountId);
+
+        if (!activityTracker.canPerformAction('dms', dmsPerHour)) {
+            this.logger.info(`Skipping DM check: Hourly limit reached (${activityTracker.getRecentCount('dms')}/${dmsPerHour}).`);
+            return;
+        }
+
+        try {
+            this.logger.info("Checking for unread Direct Messages...");
+            await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+            await delay(3000);
+            await this.handleNotificationPopup();
+
+            // Look for unread threads.
+            // Heuristic A: Look for the blue dot (often has aria-label="Unread" or similar, or specific class)
+            // Heuristic B: Look for bold styling in list items.
+            // Current IG structure: div[role="listbox"] -> div[role="link"]
+            // Unread often has a specific blue dot element: span > span[class*="x..."] (often unreliably obfuscated)
+            // But usually aria-label="Unread message" or "Unread" on the thread container.
+
+            const unreadThread = await this.page.evaluateHandle(() => {
+                const threads = Array.from(document.querySelectorAll('div[role="listbox"] a[role="link"], div[role="listbox"] div[role="button"]'));
+                // Look for "unread" in aria-label or a visible blue dot
+                return threads.find(t => {
+                    const label = t.getAttribute('aria-label') || '';
+                    if (label.toLowerCase().includes('unread')) return true;
+                    // Check for internal blue dot
+                    const html = t.innerHTML;
+                    // 0095f6 is the instagram blue color often used for dots
+                    // but better to rely on structure if aria fails. 
+                    // Let's rely on aria-label for now as it's best practice.
+                    return false;
+                }) || null;
+            });
+
+            const unreadThreadEl = unreadThread.asElement();
+            if (unreadThreadEl) {
+                this.logger.info("Found unread DM thread! Opening...");
+                await unreadThreadEl.evaluate((el) => (el as HTMLElement).click());
+                await delay(3000);
+
+                // Scrape conversation
+                // Messages are in div[role="row"] usually? or generic container.
+                // We want the LAST message that is NOT from us.
+                const lastMessageText = await this.page.evaluate(() => {
+                    const messages = Array.from(document.querySelectorAll('div[dir="auto"]')); // Text bubbles
+                    if (messages.length === 0) return null;
+
+                    // This is tricky without strict selectors for "mine" vs "theirs".
+                    // IG usually puts mine on right, theirs on left.
+                    // But 'div[dir="auto"]' is just content.
+                    // Let's try to grab the very last text bubble found in the main chat area.
+                    // Risk: It might be our own message if we sent last. 
+                    // Safety check: LLM can determine context, or we just reply anyway (double text?)
+                    // Improved: Look for specific message container classes? They change too often.
+                    return messages[messages.length - 1].textContent;
+                });
+
+                if (lastMessageText) {
+                    this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
+
+                    // Generate Response
+                    // Generate Response
+                    const schema = getInstagramDMResponseSchema();
+
+                    // Construct Personalized Prompt
+                    const charName = this.character?.aiPersona?.name || "User";
+                    const charBio = (this.character?.bio || []).join(" ");
+                    const charLore = (this.character?.lore || []).join(" ");
+                    const charTopics = (this.character?.topics || []).join(", ");
+                    const charAdjectives = (this.character?.adjectives || []).join(", ");
+                    const charStyle = (this.character?.style?.all || []).join(" ");
+
+                    const prompt = `You are ${charName} on Instagram.
+                    
+                    Your Bio: ${charBio}
+                    Your Lore/Backstory: ${charLore}
+                    Your Interests: ${charTopics}
+                    Your Style/Tone: ${charAdjectives} ${charStyle}
+                    
+                    You received a DM: "${lastMessageText}"
+                    
+                    Task: Generate a natural response as ${charName}.
+                    Guidelines:
+                    - Keep it concise (1-2 sentences usually).
+                    - Match your specific tone and style defined above.
+                    - If the message is "hi" or generic, reply in character.
+                    - If it's spam, ignore it (return empty string or "IGNORE").
+                    - Do not be overly helpful assistant-like; be the character.
+                    `;
+
+                    const result = await runAgent(schema, prompt);
+                    // result is typically an array of objects based on schema
+                    let responseText = result[0]?.response;
+
+                    if (responseText && responseText !== "IGNORE") {
+                        this.logger.info(`Generated response: "${responseText}"`);
+                        await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
+                        await delay(1000);
+
+                        // Send
+                        const sendBtn = await this.page.evaluateHandle(() => {
+                            const buttons = Array.from(document.querySelectorAll('button'));
+                            return buttons.find(b => b.textContent === 'Send') || null;
+                        });
+
+                        const sendBtnEl = sendBtn.asElement();
+                        if (sendBtnEl) {
+                            await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
+                            this.logger.info("DM Sent.");
+                            activityTracker.trackAction('dms');
+                        } else {
+                            // Enter key fallback
+                            await this.page.keyboard.press('Enter');
+                            this.logger.info("DM Sent (via Enter key).");
+                            activityTracker.trackAction('dms');
+                        }
+                    }
+                }
+            } else {
+                this.logger.info("No unread DMs found.");
+            }
+
+        } catch (e) {
+            this.logger.error(`Error checking/responding to DMs: ${e}`);
         }
     }
 

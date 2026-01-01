@@ -155,7 +155,7 @@ const runInstagram = async () => {
         password: account.password,
         userDataDir: account.userDataDir,
         proxy: account.proxy
-      }, accountLogger);
+      }, accountLogger, character);
 
       try {
         await igClient.init();
@@ -165,6 +165,12 @@ const runInstagram = async () => {
 
         const hashtags = account.settings?.hashtags || [];
         const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
+
+        // Check for Auto DMs if enabled in settings
+        if (behavior.enableAutoDMs) {
+          accountLogger.info("Checking for DMs (enabled in settings)...");
+          await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
+        }
 
         // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
         const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;

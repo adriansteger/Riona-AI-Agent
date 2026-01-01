@@ -14,7 +14,8 @@
             "hashtagMix": 0.5, // 0.0 = Feed only, 1.0 = Hashtags only
             "behavior": {
                 "enableLikes": true,
-                "enableComments": false
+                "enableComments": false,
+                "enableAutoDMs": false
             },
             "limits": {
                 "likesPerHour": 25
@@ -38,7 +39,8 @@
             "hashtagMix": 0.5, // 0.0 = Feed only, 1.0 = Hashtags only
             "behavior": {
                 "enableLikes": true,
-                "enableComments": false
+                "enableComments": false,
+                "enableAutoDMs": false
             },
             "limits": {
                 "likesPerHour": 25

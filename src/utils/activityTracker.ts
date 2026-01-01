@@ -5,6 +5,7 @@ interface ActivityLog {
     [accountId: string]: {
         likes: number[];    // Array of timestamps
         comments: number[]; // Array of timestamps
+        dms: number[];      // Array of timestamps
     }
 }
 
@@ -41,9 +42,9 @@ export class ActivityTracker {
         }
     }
 
-    private getHistory(action: 'likes' | 'comments'): number[] {
+    private getHistory(action: 'likes' | 'comments' | 'dms'): number[] {
         if (!this.data[this.accountId]) {
-            this.data[this.accountId] = { likes: [], comments: [] };
+            this.data[this.accountId] = { likes: [], comments: [], dms: [] };
         }
         return this.data[this.accountId][action] || [];
     }
@@ -52,12 +53,13 @@ export class ActivityTracker {
         // Keep logs for 24 hours
         const cutoff = Date.now() - 24 * 60 * 60 * 1000;
         if (this.data[this.accountId]) {
-            this.data[this.accountId].likes = this.data[this.accountId].likes.filter(t => t > cutoff);
-            this.data[this.accountId].comments = this.data[this.accountId].comments.filter(t => t > cutoff);
+            this.data[this.accountId].likes = (this.data[this.accountId].likes || []).filter(t => t > cutoff);
+            this.data[this.accountId].comments = (this.data[this.accountId].comments || []).filter(t => t > cutoff);
+            this.data[this.accountId].dms = (this.data[this.accountId].dms || []).filter(t => t > cutoff);
         }
     }
 
-    public canPerformAction(action: 'likes' | 'comments', limitPerHour: number): boolean {
+    public canPerformAction(action: 'likes' | 'comments' | 'dms', limitPerHour: number): boolean {
         this.data = this.loadData(); // Reload to get latest from other processes
         this.cleanOldEntries();
 
@@ -68,16 +70,17 @@ export class ActivityTracker {
         return recentActions.length < limitPerHour;
     }
 
-    public trackAction(action: 'likes' | 'comments') {
+    public trackAction(action: 'likes' | 'comments' | 'dms') {
         this.data = this.loadData();
         if (!this.data[this.accountId]) {
-            this.data[this.accountId] = { likes: [], comments: [] };
+            this.data[this.accountId] = { likes: [], comments: [], dms: [] };
         }
+        if (!this.data[this.accountId][action]) this.data[this.accountId][action] = [];
         this.data[this.accountId][action].push(Date.now());
         this.saveData();
     }
 
-    public getRecentCount(action: 'likes' | 'comments'): number {
+    public getRecentCount(action: 'likes' | 'comments' | 'dms'): number {
         this.data = this.loadData();
         const history = this.getHistory(action);
         const oneHourAgo = Date.now() - 60 * 60 * 1000;

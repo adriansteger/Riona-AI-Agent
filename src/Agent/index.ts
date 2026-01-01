@@ -30,7 +30,7 @@ const getNextAgentApiKey = () => {
 };
 
 export async function runAgent(
-  schema: InstagramCommentSchema,
+  schema: any,
   prompt: string,
   apiKeyIndex: number = currentAgentApiKeyIndex
 ): Promise<any> {
