@@ -6,7 +6,7 @@ import cors from "cors";
 import session from 'express-session';
 
 import logger, { setupErrorHandlers } from "./config/logger";
-import { setup_HandleError, ActivityTracker } from "./utils";
+import { setup_HandleError, ActivityTracker, pLimit } from "./utils";
 import path from 'path';
 import { connectDB } from "./config/db";
 import apiRoutes from "./routes/api";
@@ -76,11 +76,153 @@ app.get('*', (_req, res) => {
   }
 });
 
+// Registry for active persistent sessions
+const activeSessions = new Map<string, IgClient>();
+
+const processAccount = async (account: any) => {
+  // Stagger start slightly (0-5s) to avoid CPU spikes if multiple launch at once
+  const stagger = Math.floor(Math.random() * 5000);
+  await new Promise(r => setTimeout(r, stagger));
+
+  const accountLogger = createAccountLogger(account.id);
+  accountLogger.info(`>>> Starting session for account: ${account.id} (${account.username}) <<<`);
+
+  try {
+    // Load specific character for this account
+    const character = chooseCharacter(account.character);
+    accountLogger.info(`Loaded character: ${character?.aiPersona?.name || "Default/Unknown"}`);
+
+    // --- SETTINGS MERGE ---
+    // 1. Get defaults from Character (or hard defaults)
+    const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true };
+    const characterLimits = character?.limits || { likesPerHour: 10, commentsPerHour: 5 };
+
+    // 2. Get overrides from Account Config (accounts.json)
+    const accountBehavior = account.settings?.behavior || {};
+    const accountLimits = account.settings?.limits || {};
+
+    // 3. Merge: Account settings take precedence
+    const behavior = { ...characterBehavior, ...accountBehavior };
+    const limits = { ...characterLimits, ...accountLimits };
+
+    // --- PRE-RUN AVAILABILITY CHECK ---
+    const trackerId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
+    const activityTracker = new ActivityTracker(trackerId);
+
+    const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
+    const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
+
+    let isBlocked = false;
+    let maxWaitTime = 0;
+
+    if (behavior.enableLikes !== false && msToNextLike > 0) {
+      if (behavior.enableComments === false || msToNextComment > 0) {
+        isBlocked = true;
+        maxWaitTime = Math.max(msToNextLike, msToNextComment);
+      }
+    } else if (behavior.enableComments !== false && msToNextComment > 0) {
+      if (behavior.enableLikes === false || msToNextLike > 0) {
+        isBlocked = true;
+        maxWaitTime = Math.max(msToNextLike, msToNextComment);
+      }
+    }
+
+    if (isBlocked) {
+      const waitMinutes = Math.ceil(maxWaitTime / 60000);
+      accountLogger.warn(`Limits reached. Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
+
+      // Critical: If blocked, ensure we close the session to save RAM
+      const existingClient = activeSessions.get(account.id);
+      if (existingClient) {
+        await existingClient.close();
+        activeSessions.delete(account.id);
+        accountLogger.info("Closed persistent session due to rate limits.");
+      }
+      return;
+    }
+
+    // --- REUSE OR CREATE CLIENT ---
+    let igClient = activeSessions.get(account.id);
+
+    // If client exists but disconnected, clear it
+    if (igClient && !igClient.isConnected()) {
+      activeSessions.delete(account.id);
+      igClient = undefined;
+    }
+
+    if (!igClient) {
+      // Initialize New Client
+      igClient = new IgClient({
+        username: account.username,
+        password: account.password,
+        userDataDir: account.userDataDir,
+        proxy: account.proxy
+      }, accountLogger, character);
+
+      activeSessions.set(account.id, igClient);
+    } else {
+      accountLogger.info("Reusing active browser session.");
+    }
+
+    try {
+      await igClient.init(); // Idempotent now
+
+      accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
+      accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
+
+      const hashtags = account.settings?.hashtags || [];
+      const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
+
+      // Check for Auto DMs if enabled in settings
+      if (behavior.enableAutoDMs) {
+        accountLogger.info("Checking for DMs (enabled in settings)...");
+        await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
+      }
+
+      // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
+      const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
+
+      if (useHashtags) {
+        accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
+        await igClient.interactWithHashtags(hashtags, { behavior, limits });
+      } else {
+        accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
+        await igClient.interactWithPosts({ behavior, limits });
+      }
+    } catch (err) {
+      throw err; // Re-throw to be caught by outer catch for logging
+    } finally {
+      // SMART CLOSE: Only close if limits are now reached
+      const nextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
+      const nextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
+
+      let limitsReachedNow = false;
+      if (behavior.enableLikes !== false && nextLike > 0) {
+        if (behavior.enableComments === false || nextComment > 0) limitsReachedNow = true;
+      } else if (behavior.enableComments !== false && nextComment > 0) {
+        if (behavior.enableLikes === false || nextLike > 0) limitsReachedNow = true;
+      }
+
+      if (limitsReachedNow) {
+        accountLogger.info("Hourly limits reached after this session. Closing browser to save resources.");
+        await igClient.close();
+        activeSessions.delete(account.id);
+      } else {
+        accountLogger.info("Limits not yet reached. Keeping browser open for next cycle.");
+      }
+
+      accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
+    }
+
+  } catch (error) {
+    accountLogger.error(`Error processing account ${account.id}: ${error}`);
+  }
+};
+
 // Define runInstagram
 const runInstagram = async () => {
   logger.info("Starting Multi-Account Instagram Bot...");
 
-  // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
   // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
   const accounts: any[] = accountConfig;
   const enabledAccounts = accounts.filter(a => a.enabled);
@@ -92,112 +234,19 @@ const runInstagram = async () => {
 
   logger.info(`Found ${enabledAccounts.length} enabled Instagram accounts: ${enabledAccounts.map(a => a.id).join(', ')}`);
 
-  for (const account of enabledAccounts) {
+  // Configurable Concurrency
+  // Default to 5 if not set
+  const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
+  logger.info(`Running with MAX_CONCURRENT_SESSIONS: ${maxConcurrent}`);
 
-    const accountLogger = createAccountLogger(account.id);
-    accountLogger.info(`>>> Starting session for account: ${account.id} (${account.username}) <<<`);
+  const limit = pLimit(maxConcurrent);
 
-    try {
-      // Load specific character for this account
-      const character = chooseCharacter(account.character);
-      accountLogger.info(`Loaded character: ${character?.aiPersona?.name || "Default/Unknown"}`);
+  // Create promises for all enabled accounts
+  const promises = enabledAccounts.map(account => limit(() => processAccount(account)));
 
-      // --- SETTINGS MERGE (Moved up for pre-check) ---
-      // 1. Get defaults from Character (or hard defaults)
-      const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true };
-      const characterLimits = character?.limits || { likesPerHour: 10, commentsPerHour: 5 };
+  // Wait for all to finish
+  await Promise.all(promises);
 
-      // 2. Get overrides from Account Config (accounts.json)
-      const accountBehavior = account.settings?.behavior || {};
-      const accountLimits = account.settings?.limits || {};
-
-      // 3. Merge: Account settings take precedence
-      const behavior = { ...characterBehavior, ...accountBehavior };
-      const limits = { ...characterLimits, ...accountLimits };
-
-      // --- PRE-RUN AVAILABILITY CHECK ---
-      const trackerId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
-      const activityTracker = new ActivityTracker(trackerId);
-
-      const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
-      const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-
-      // If a feature is disabled, we consider it "ready" (time=0) effectively, but we need to check if *enabled* features are blocked.
-      // Logic: If I want to like, and I can't... wait. If I want to comment, and I can't... wait.
-      // If ALL enabled features are blocked, we skip.
-
-      let isBlocked = false;
-      let maxWaitTime = 0;
-
-      if (behavior.enableLikes !== false && msToNextLike > 0) {
-        if (behavior.enableComments === false || msToNextComment > 0) {
-          // Likes blocked, and comments either disabled or blocked -> BLOCKED
-          isBlocked = true;
-          maxWaitTime = Math.max(msToNextLike, msToNextComment);
-        }
-      } else if (behavior.enableComments !== false && msToNextComment > 0) {
-        if (behavior.enableLikes === false || msToNextLike > 0) {
-          // Comments blocked, and likes either disabled or blocked -> BLOCKED
-          isBlocked = true;
-          maxWaitTime = Math.max(msToNextLike, msToNextComment);
-        }
-      }
-
-      if (isBlocked) {
-        const waitMinutes = Math.ceil(maxWaitTime / 60000);
-        accountLogger.warn(`Limits reached. Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
-        continue;
-      }
-
-      // Initialize Client with account config and isolated logger
-      const igClient = new IgClient({
-        username: account.username,
-        password: account.password,
-        userDataDir: account.userDataDir,
-        proxy: account.proxy
-      }, accountLogger, character);
-
-      try {
-        await igClient.init();
-
-        accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
-        accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
-
-        const hashtags = account.settings?.hashtags || [];
-        const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
-
-        // Check for Auto DMs if enabled in settings
-        if (behavior.enableAutoDMs) {
-          accountLogger.info("Checking for DMs (enabled in settings)...");
-          await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
-        }
-
-        // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
-        const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
-
-        if (useHashtags) {
-          accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-          await igClient.interactWithHashtags(hashtags, { behavior, limits });
-        } else {
-          accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-          await igClient.interactWithPosts({ behavior, limits });
-        }
-      } catch (err) {
-        throw err; // Re-throw to be caught by outer catch for logging
-      } finally {
-        await igClient.close();
-        accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
-      }
-
-    } catch (error) {
-      accountLogger.error(`Error processing account ${account.id}: ${error}`);
-    }
-
-    // Delay between accounts
-    const switchDelay = 10000;
-    logger.info(`Waiting ${switchDelay / 1000}s before next account...`);
-    await new Promise(r => setTimeout(r, switchDelay));
-  }
   logger.info("All accounts processed.");
 };
 

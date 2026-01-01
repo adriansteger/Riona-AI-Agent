@@ -48,7 +48,16 @@ export class IgClient {
         this.character = character || {};
     }
 
+    public isConnected(): boolean {
+        return !!(this.browser && this.browser.isConnected());
+    }
+
     async init() {
+        if (this.isConnected()) {
+            this.logger.info("Browser already active and connected. Skipping launch.");
+            return;
+        }
+
         // Center the window on a 1920x1080 screen
         const width = 1280;
         const height = 800;
@@ -120,13 +129,15 @@ export class IgClient {
             await fs.mkdir(absoluteUserDataDir, { recursive: true }).catch(() => { });
 
             // PROACTIVE CLEANUP: Kill any lingering Chrome processes for this profile BEFORE launching
-            // This prevents "multiple sessions" errors if the previous run didn't exit cleanly.
-            try {
-                this.logger.info("Proactively cleaning up any existing Chrome processes for this profile...");
-                await killChromeProcessByProfile(this.userDataDir);
-                await delay(2000); // Give it a moment to release locks
-            } catch (e: any) {
-                this.logger.warn(`Proactive cleanup failed (non-critical): ${e.message}`);
+            // Only if NOT connected (already checked above, but good for safety)
+            if (!this.isConnected()) {
+                try {
+                    this.logger.info("Proactively cleaning up any existing Chrome processes for this profile...");
+                    await killChromeProcessByProfile(this.userDataDir);
+                    await delay(2000); // Give it a moment to release locks
+                } catch (e: any) {
+                    this.logger.warn(`Proactive cleanup failed (non-critical): ${e.message}`);
+                }
             }
         }
 
