@@ -86,7 +86,7 @@ export class ActivityTracker {
         const oneHourAgo = Date.now() - 60 * 60 * 1000;
         return history.filter(t => t > oneHourAgo).length;
     }
-    public getTimeUntilAvailable(action: 'likes' | 'comments', limitPerHour: number): number {
+    public getTimeUntilAvailable(action: 'likes' | 'comments' | 'dms', limitPerHour: number): number {
         this.data = this.loadData();
         const history = this.getHistory(action);
         const oneHourAgo = Date.now() - 60 * 60 * 1000;

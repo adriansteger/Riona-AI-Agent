@@ -111,25 +111,32 @@ const processAccount = async (account: any) => {
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
     const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
+    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 5) : 0;
 
-    let isBlocked = false;
+    let isBlocked = true; // Start true, set to false if ANY action is possible
     let maxWaitTime = 0;
 
-    if (behavior.enableLikes !== false && msToNextLike > 0) {
-      if (behavior.enableComments === false || msToNextComment > 0) {
-        isBlocked = true;
-        maxWaitTime = Math.max(msToNextLike, msToNextComment);
-      }
-    } else if (behavior.enableComments !== false && msToNextComment > 0) {
-      if (behavior.enableLikes === false || msToNextLike > 0) {
-        isBlocked = true;
-        maxWaitTime = Math.max(msToNextLike, msToNextComment);
-      }
+    // Check if at least ONE enabled action is available
+    if (behavior.enableLikes !== false && msToNextLike === 0) isBlocked = false;
+    if (behavior.enableComments !== false && msToNextComment === 0) isBlocked = false;
+    if (behavior.enableAutoDMs === true && msToNextDM === 0) isBlocked = false;
+
+    // Calculate wait time only if strictly blocked? 
+    // Actually, "maxWaitTime" was used for logging. Let's simplify.
+    // If everything enabled is on cooldown, we are blocked.
+
+    if (isBlocked) {
+      const waits = [];
+      if (behavior.enableLikes !== false) waits.push(msToNextLike);
+      if (behavior.enableComments !== false) waits.push(msToNextComment);
+      if (behavior.enableAutoDMs === true) waits.push(msToNextDM);
+
+      maxWaitTime = waits.length > 0 ? Math.min(...waits) : 0; // Wait for the SOONEST action
     }
 
     if (isBlocked) {
       const waitMinutes = Math.ceil(maxWaitTime / 60000);
-      accountLogger.warn(`Limits reached. Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
+      accountLogger.warn(`Limits reached (Likes/Comments/DMs). Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
 
       // Critical: If blocked, ensure we close the session to save RAM
       const existingClient = activeSessions.get(account.id);

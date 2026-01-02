@@ -592,16 +592,27 @@ export class IgClient {
     }
 
     async handleNotificationPopup() {
-        if (!this.page) throw new Error("Page not initialized");
-        console.log("Checking for notification popup...");
+        if (!this.page || this.page.isClosed()) return;
+        // console.log("Checking for notification popup..."); // Reduce spam
 
         try {
-            await this.handleWhatHappenedPopup(); // Check for "What happened" dialog first
+            // Safety Check: If page is navigating, this might fail with "Detached Frame"
+            // We can use Promise.race with a timeout to prevent hanging?
+            // Or just swallow specific errors.
+            await this.handleWhatHappenedPopup().catch(() => { }); // Swallow warnings here
 
             // Wait for the dialog to appear, with a timeout
             const dialogSelector = 'div[role="dialog"]';
-            await this.page.waitForSelector(dialogSelector, { timeout: 5000 });
+            // Use a short timeout to prevent blocking
+            try {
+                await this.page.waitForSelector(dialogSelector, { timeout: 3000 });
+            } catch (e) {
+                // No dialog found, which is GOOD. standard flow.
+                return;
+            }
+            // If found, proceed...
             const dialog = await this.page.$(dialogSelector);
+            if (!dialog) return;
 
             if (dialog) {
                 console.log("Notification dialog found. Searching for 'Not Now' button.");
@@ -783,71 +794,168 @@ export class IgClient {
 
         try {
             this.logger.info("Checking for unread Direct Messages...");
+            // Listen for browser console logs (DEBUG)
+            this.page.on('console', msg => {
+                if (msg.text().includes('[DM DEBUG]')) {
+                    console.log(`BROWSER CONS: ${msg.text()}`);
+                }
+            });
+
             await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
             await delay(3000);
             await this.handleNotificationPopup();
 
-            // Look for unread threads.
-            // Heuristic A: Look for the blue dot (often has aria-label="Unread" or similar, or specific class)
-            // Heuristic B: Look for bold styling in list items.
-            // Current IG structure: div[role="listbox"] -> div[role="link"]
-            // Unread often has a specific blue dot element: span > span[class*="x..."] (often unreliably obfuscated)
-            // But usually aria-label="Unread message" or "Unread" on the thread container.
+            let processedCount = 0;
+            const maxToProcess = Math.min(dmsPerHour, 10);
 
-            const unreadThread = await this.page.evaluateHandle(() => {
-                const threads = Array.from(document.querySelectorAll('div[role="listbox"] a[role="link"], div[role="listbox"] div[role="button"]'));
-                // Look for "unread" in aria-label or a visible blue dot
-                return threads.find(t => {
-                    const label = t.getAttribute('aria-label') || '';
-                    if (label.toLowerCase().includes('unread')) return true;
-                    // Check for internal blue dot
-                    const html = t.innerHTML;
-                    // 0095f6 is the instagram blue color often used for dots
-                    // but better to rely on structure if aria fails. 
-                    // Let's rely on aria-label for now as it's best practice.
-                    return false;
-                }) || null;
-            });
+            while (processedCount < maxToProcess) {
+                if (processedCount > 0) {
+                    this.logger.info(`[DM BATCH] Processing next item ${processedCount + 1}/${maxToProcess}`);
+                    await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+                    await delay(3000);
+                    await this.handleNotificationPopup();
+                }
 
-            const unreadThreadEl = unreadThread.asElement();
-            if (unreadThreadEl) {
-                this.logger.info("Found unread DM thread! Opening...");
-                await unreadThreadEl.evaluate((el) => (el as HTMLElement).click());
-                await delay(3000);
+                // Debug Screenshot
+                try {
+                    const screenshotPath = path.resolve('screenshots', `inbox_debug_${Date.now()}.png`);
+                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
+                    await this.page.screenshot({ path: screenshotPath });
+                    this.logger.info(`Saved debug screenshot to: ${screenshotPath}`);
+                } catch (e) { /* ignore */ }
 
-                // Scrape conversation
-                // Messages are in div[role="row"] usually? or generic container.
-                // We want the LAST message that is NOT from us.
-                const lastMessageText = await this.page.evaluate(() => {
-                    const messages = Array.from(document.querySelectorAll('div[dir="auto"]')); // Text bubbles
-                    if (messages.length === 0) return null;
+                // Retry logic for Detached Frame errors
+                let unreadThread;
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    try {
+                        const myUsername = this.username;
+                        unreadThread = await this.page.evaluateHandle((myUser) => {
+                            // Selector: Items INSIDE the Message Listbox (role="listbox")
+                            // We look for buttons OR links to be safe.
+                            let threads = Array.from(document.querySelectorAll('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
 
-                    // This is tricky without strict selectors for "mine" vs "theirs".
-                    // IG usually puts mine on right, theirs on left.
-                    // But 'div[dir="auto"]' is just content.
-                    // Let's try to grab the very last text bubble found in the main chat area.
-                    // Risk: It might be our own message if we sent last. 
-                    // Safety check: LLM can determine context, or we just reply anyway (double text?)
-                    // Improved: Look for specific message container classes? They change too often.
-                    return messages[messages.length - 1].textContent;
-                });
+                            // Fallback: If no listbox found (different layout), try broad search but exclude top bar
+                            if (threads.length === 0) {
+                                console.log("[DM DEBUG] No role='listbox' found. Using broad search...");
+                                // Exclude div with role="tablist" (stories) usually
+                                threads = Array.from(document.querySelectorAll('div[role="button"], a[href^="/direct/t/"]'));
+                            }
 
-                if (lastMessageText) {
-                    this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
+                            console.log(`[DM DEBUG] Found ${threads.length} candidates.`);
 
-                    // Generate Response
-                    // Generate Response
-                    const schema = getInstagramDMResponseSchema();
+                            return threads.find((t, index) => {
+                                const textContent = (t as HTMLElement).innerText || '';
 
-                    // Construct Personalized Prompt
-                    const charName = this.character?.aiPersona?.name || "User";
-                    const charBio = (this.character?.bio || []).join(" ");
-                    const charLore = (this.character?.lore || []).join(" ");
-                    const charTopics = (this.character?.topics || []).join(", ");
-                    const charAdjectives = (this.character?.adjectives || []).join(", ");
-                    const charStyle = (this.character?.style?.all || []).join(" ");
+                                // FILTER: Ignore "Notes" / Self-reference
+                                if (textContent.toLowerCase().includes(myUser.toLowerCase())) {
+                                    if (index < 3) console.log(`[DM DEBUG] Item ${index} SKIPPED (Self): "${textContent.substring(0, 15)}..."`);
+                                    return false;
+                                }
 
-                    const prompt = `You are ${charName} on Instagram.
+                                // FILTER: Shape Check (CRITICAL)
+                                // DM Threads are wide rectangles (Row). Notes/Stories are circles/squares (Column).
+                                // We skip anything that looks like a "Bubble".
+                                const rect = t.getBoundingClientRect();
+                                const aspectRatio = rect.width / rect.height;
+                                if (aspectRatio < 1.5) {
+                                    if (index < 5) console.log(`[DM DEBUG] Item ${index} SKIPPED (Bubble/Note): Ratio=${aspectRatio.toFixed(2)} (${Math.round(rect.width)}x${Math.round(rect.height)})`);
+                                    return false;
+                                }
+
+
+                                if (index < 3) {
+                                    const cleanHtml = t.outerHTML.replace(/\s+/g, ' ').substring(0, 50);
+                                    console.log(`[DM DEBUG] Item ${index} fragment: ${cleanHtml}`);
+                                }
+
+                                const label = t.getAttribute('aria-label') || '';
+                                const hasBlueDot = (() => {
+                                    const allChildren = t.querySelectorAll('*');
+                                    for (const child of allChildren) {
+                                        const style = window.getComputedStyle(child);
+                                        if (style.backgroundColor.includes('0, 149, 246')) return true;
+                                        if (style.height === '8px' && style.borderRadius === '50%') return true;
+                                    }
+                                    return false;
+                                })();
+
+                                const hasBoldText = (() => {
+                                    const allChildren = t.querySelectorAll('*');
+                                    for (const child of allChildren) {
+                                        const w = window.getComputedStyle(child).fontWeight;
+                                        if (w === '600' || w === '700' || w === 'bold') return true;
+                                    }
+                                    return false;
+                                })();
+
+                                if (index < 3) console.log(`[DM DEBUG] Item ${index}: Label="${label}", BlueDot=${hasBlueDot}, Bold=${hasBoldText}`);
+
+                                if (label.toLowerCase().includes('unread')) {
+                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: Aria)`);
+                                    return true;
+                                }
+                                if (hasBlueDot) {
+                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: BlueDot)`);
+                                    return true;
+                                }
+                                if (hasBoldText) {
+                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: BoldText)`);
+                                    return true;
+                                }
+
+                                return false;
+                            }) || null;
+                        }, myUsername);
+                        break; // Success
+                    } catch (err: any) {
+                        if (err.message && err.message.includes('detached Frame') && attempt === 1) {
+                            this.logger.warn("Frame detached during DM check. Retrying...");
+                            await delay(2000);
+                            continue;
+                        }
+                        throw err; // Re-throw if not detached frame or max attempts
+                    }
+                }
+
+                const unreadThreadEl = unreadThread ? unreadThread.asElement() : null;
+                if (unreadThreadEl) {
+                    this.logger.info("Found unread DM thread! Opening...");
+                    await unreadThreadEl.evaluate((el) => (el as HTMLElement).click());
+                    await delay(3000);
+
+                    // Scrape conversation
+                    // Messages are in div[role="row"] usually? or generic container.
+                    // We want the LAST message that is NOT from us.
+                    const lastMessageText = await this.page.evaluate(() => {
+                        const messages = Array.from(document.querySelectorAll('div[dir="auto"]')); // Text bubbles
+                        if (messages.length === 0) return null;
+
+                        // This is tricky without strict selectors for "mine" vs "theirs".
+                        // IG usually puts mine on right, theirs on left.
+                        // But 'div[dir="auto"]' is just content.
+                        // Let's try to grab the very last text bubble found in the main chat area.
+                        // Risk: It might be our own message if we sent last. 
+                        // Safety check: LLM can determine context, or we just reply anyway (double text?)
+                        // Improved: Look for specific message container classes? They change too often.
+                        return messages[messages.length - 1].textContent;
+                    });
+
+                    if (lastMessageText) {
+                        this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
+
+                        // Generate Response
+                        // Generate Response
+                        const schema = getInstagramDMResponseSchema();
+
+                        // Construct Personalized Prompt
+                        const charName = this.character?.aiPersona?.name || "User";
+                        const charBio = (this.character?.bio || []).join(" ");
+                        const charLore = (this.character?.lore || []).join(" ");
+                        const charTopics = (this.character?.topics || []).join(", ");
+                        const charAdjectives = (this.character?.adjectives || []).join(", ");
+                        const charStyle = (this.character?.style?.all || []).join(" ");
+
+                        const prompt = `You are ${charName} on Instagram.
                     
                     Your Bio: ${charBio}
                     Your Lore/Backstory: ${charLore}
@@ -865,37 +973,42 @@ export class IgClient {
                     - Do not be overly helpful assistant-like; be the character.
                     `;
 
-                    const result = await runAgent(schema, prompt);
-                    // result is typically an array of objects based on schema
-                    let responseText = result[0]?.response;
+                        const result = await runAgent(schema, prompt);
+                        // result is typically an array of objects based on schema
+                        let responseText = result[0]?.response;
 
-                    if (responseText && responseText !== "IGNORE") {
-                        this.logger.info(`Generated response: "${responseText}"`);
-                        await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
-                        await delay(1000);
+                        if (responseText && responseText !== "IGNORE") {
+                            this.logger.info(`Generated response: "${responseText}"`);
+                            await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
+                            await delay(1000);
 
-                        // Send
-                        const sendBtn = await this.page.evaluateHandle(() => {
-                            const buttons = Array.from(document.querySelectorAll('button'));
-                            return buttons.find(b => b.textContent === 'Send') || null;
-                        });
+                            // Send
+                            const sendBtn = await this.page.evaluateHandle(() => {
+                                const buttons = Array.from(document.querySelectorAll('button'));
+                                return buttons.find(b => b.textContent === 'Send') || null;
+                            });
 
-                        const sendBtnEl = sendBtn.asElement();
-                        if (sendBtnEl) {
-                            await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
-                            this.logger.info("DM Sent.");
-                            activityTracker.trackAction('dms');
-                        } else {
-                            // Enter key fallback
-                            await this.page.keyboard.press('Enter');
-                            this.logger.info("DM Sent (via Enter key).");
-                            activityTracker.trackAction('dms');
+                            const sendBtnEl = sendBtn.asElement();
+                            if (sendBtnEl) {
+                                await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
+                                this.logger.info("DM Sent.");
+                                activityTracker.trackAction('dms');
+                            } else {
+                                // Enter key fallback
+                                await this.page.keyboard.press('Enter');
+                                this.logger.info("DM Sent (via Enter key).");
+                                activityTracker.trackAction('dms');
+                                processedCount++;
+                            }
                         }
                     }
+                    // Random delay between messages in batch
+                    await delay(3000 + Math.random() * 5000);
+                } else {
+                    this.logger.info("No unread DMs found. Batch finished.");
+                    break;
                 }
-            } else {
-                this.logger.info("No unread DMs found.");
-            }
+            } // End While Loop
 
         } catch (e) {
             this.logger.error(`Error checking/responding to DMs: ${e}`);
