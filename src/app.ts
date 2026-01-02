@@ -111,9 +111,9 @@ const processAccount = async (account: any) => {
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
     const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 5) : 0;
+    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 20) : 0; // Increased default to 20
 
-    let isBlocked = true; // Start true, set to false if ANY action is possible
+    let isBlocked = true;
     let maxWaitTime = 0;
 
     // Check if at least ONE enabled action is available
@@ -121,22 +121,19 @@ const processAccount = async (account: any) => {
     if (behavior.enableComments !== false && msToNextComment === 0) isBlocked = false;
     if (behavior.enableAutoDMs === true && msToNextDM === 0) isBlocked = false;
 
-    // Calculate wait time only if strictly blocked? 
-    // Actually, "maxWaitTime" was used for logging. Let's simplify.
-    // If everything enabled is on cooldown, we are blocked.
-
     if (isBlocked) {
       const waits = [];
       if (behavior.enableLikes !== false) waits.push(msToNextLike);
       if (behavior.enableComments !== false) waits.push(msToNextComment);
       if (behavior.enableAutoDMs === true) waits.push(msToNextDM);
 
-      maxWaitTime = waits.length > 0 ? Math.min(...waits) : 0; // Wait for the SOONEST action
-    }
+      maxWaitTime = waits.length > 0 ? Math.min(...waits) : 0;
 
-    if (isBlocked) {
       const waitMinutes = Math.ceil(maxWaitTime / 60000);
-      accountLogger.warn(`Limits reached (Likes/Comments/DMs). Next action possible in ~${waitMinutes} minutes. Skipping this session.`);
+      const dmWait = Math.ceil(msToNextDM / 60000);
+      const likeWait = Math.ceil(msToNextLike / 60000);
+
+      accountLogger.warn(`All enabled actions are on cooldown. Waiting ~${waitMinutes}m. (Likes: ${likeWait}m, DMs: ${dmWait}m)`);
 
       // Critical: If blocked, ensure we close the session to save RAM
       const existingClient = activeSessions.get(account.id);
@@ -210,12 +207,19 @@ const processAccount = async (account: any) => {
         if (behavior.enableLikes === false || nextLike > 0) limitsReachedNow = true;
       }
 
-      if (limitsReachedNow) {
-        accountLogger.info("Hourly limits reached after this session. Closing browser to save resources.");
+      const maxSessions = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5');
+      const shouldClose = limitsReachedNow && activeSessions.size > maxSessions;
+
+      if (shouldClose) {
+        accountLogger.info(`Hourly limits reached and session slots full (${activeSessions.size}/${maxSessions}). Closing browser.`);
         await igClient.close();
         activeSessions.delete(account.id);
       } else {
-        accountLogger.info("Limits not yet reached. Keeping browser open for next cycle.");
+        if (limitsReachedNow) {
+          accountLogger.info(`Hourly limits reached, but keeping browser open (Sessions: ${activeSessions.size}/${maxSessions}).`);
+        } else {
+          accountLogger.info("Limits not yet reached. Keeping browser open for next cycle.");
+        }
       }
 
       accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);

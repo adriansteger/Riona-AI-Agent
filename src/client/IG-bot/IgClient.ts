@@ -1,4 +1,5 @@
 import * as puppeteer from 'puppeteer';
+import { ElementHandle } from 'puppeteer';
 import puppeteerExtra from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
@@ -780,8 +781,171 @@ export class IgClient {
 
 
 
+    async checkAndAcceptDMRequests() {
+        if (!this.page) return;
+        try {
+            // Enable Console Logging for this method
+            this.page.on('console', msg => {
+                if (msg.text().includes('[REQ DEBUG]')) console.log(`BROWSER REQ: ${msg.text()}`);
+            });
+
+            this.logger.info("Checking for DM Requests...");
+            await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+            await delay(3000);
+
+            // DEBUG: Dump Page Structure to identify selectors
+            await this.page.evaluate(() => {
+                console.log("[REQ DEBUG] Analysis Started.");
+                const allDivs = Array.from(document.querySelectorAll('div, a, button'));
+                let candidates = 0;
+                allDivs.forEach((el, index) => {
+                    const r = el.getBoundingClientRect();
+                    // Basic visibility check
+                    if (r.width < 10 || r.height < 10) return;
+
+                    const role = el.getAttribute('role');
+                    const label = el.getAttribute('aria-label');
+                    const txt = (el as HTMLElement).innerText?.substring(0, 20).replace(/\n/g, "|") || "";
+
+                    // Filter for interesting elements
+                    if (role === 'button' || role === 'link' || role === 'listitem' || (txt.length > 3 && r.width > 200)) {
+                        if (candidates < 20) {
+                            console.log(`[REQ DEBUG] El #${index}: <${el.tagName.toLowerCase()}> Role=${role} Class="${el.className}" Size=${Math.round(r.width)}x${Math.round(r.height)} Text="${txt}"`);
+                            candidates++;
+                        }
+                    }
+                });
+                console.log(`[REQ DEBUG] Analysis Complete. Found ${candidates} visible candidates.`);
+            });
+
+            // DEBUG: Screenshot
+            try {
+                const screenshotPath = path.resolve('screenshots', `requests_debug_${Date.now()}.png`);
+                await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
+                await this.page.screenshot({ path: screenshotPath });
+                this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
+            } catch (e) { /* ignore */ }
+
+            // Strategy 1: Specific Listbox Buttons
+            let requests: ElementHandle<Element>[] = await this.page.$$('div[role="listbox"] div[role="button"]');
+
+            // Strategy 2: Broad "listitem" or "row"
+            if (requests.length === 0) {
+                this.logger.info("Strategy 1 (Listbox) failed. Trying Strategy 2 (Broad Rows)...");
+                requests = await this.page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
+            }
+
+            // Strategy 3: Text Search for "Request" context (Blind Attempt)
+            if (requests.length === 0) {
+                this.logger.info("Strategy 2 failed. Trying Strategy 3 (Any wide button)...");
+                // Filter for elements that look like user rows
+                requests = await this.page.evaluateHandle(() => {
+                    const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
+                    return candidates.filter(c => {
+                        const r = c.getBoundingClientRect();
+                        // Wide and short? (Row shape)
+                        return r.width > 200 && r.height > 40 && r.height < 150;
+                    });
+                }).then(async h => {
+                    const props = await h.getProperties();
+                    const res: ElementHandle<Element>[] = [];
+                    for (const v of props.values()) {
+                        const el = v.asElement();
+                        if (el) res.push(el as ElementHandle<Element>);
+                    }
+                    return res;
+                });
+            }
+
+            if (requests.length === 0) {
+                this.logger.info("No DM requests found (checked multiple strategies).");
+                return;
+            }
+
+            this.logger.info(`Found ${requests.length} potential requests. Processing top 3...`);
+
+            const maxToAccept = Math.min(requests.length, 3);
+            for (let i = 0; i < maxToAccept; i++) {
+                // Re-fetch using SHAPE STRATEGY (The only one that works)
+                const currentRequests = await this.page.evaluateHandle(() => {
+                    const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
+                    return candidates.filter(c => {
+                        const r = c.getBoundingClientRect();
+                        const txt = (c as HTMLElement).innerText || "";
+                        const isHiddenReq = txt.includes("Hidden Requests");
+                        const isHeader = txt.includes("Message requests") || txt.includes("Decide who can");
+                        const isPrimary = r.width > 200 && r.height > 40 && r.height < 150;
+                        return isPrimary && !isHiddenReq && !isHeader;
+                    });
+                }).then(async h => {
+                    const props = await h.getProperties();
+                    const res: ElementHandle<Element>[] = [];
+                    for (const v of props.values()) {
+                        const el = v.asElement();
+                        if (el) res.push(el as ElementHandle<Element>);
+                    }
+                    return res;
+                });
+
+                if (currentRequests.length === 0) {
+                    this.logger.info("No more requests found (loop).");
+                    break;
+                }
+
+                // Click the first one
+                try {
+                    const text = await currentRequests[0].evaluate(el => (el as HTMLElement).innerText.substring(0, 30));
+                    this.logger.info(`Clicking request item: "${text.replace(/\n/g, ' ')}..."`);
+                    await currentRequests[0].click();
+                } catch (e) {
+                    this.logger.warn(`Failed to click request item: ${e}`);
+                    break;
+                }
+
+                await delay(3000);
+
+                // Find "Accept" button
+                const acceptBtn = await this.page.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
+                    return buttons.find(b => (b.textContent?.trim() === 'Accept' || (b as HTMLElement).innerText?.trim() === 'Accept')) || null;
+                });
+
+                const acceptBtnEl = acceptBtn.asElement();
+                if (acceptBtnEl) {
+                    await (acceptBtnEl as ElementHandle<Element>).click();
+                    await delay(3000);
+
+                    // Handle "Move to Primary" dialog if it appears
+                    const primaryBtn = await this.page.evaluateHandle(() => {
+                        const buttons = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button'));
+                        return buttons.find(b => (b.textContent?.trim() === 'Primary' || (b as HTMLElement).innerText?.trim() === 'Primary')) || null;
+                    });
+
+                    const primaryBtnEl = primaryBtn.asElement();
+                    if (primaryBtnEl) {
+                        await (primaryBtnEl as ElementHandle<Element>).click();
+                        await delay(1000);
+                    }
+
+                    this.logger.info(`Accepted DM request ${i + 1}/${maxToAccept}`);
+                } else {
+                    this.logger.warn(`Could not find Accept button for request ${i + 1}.`);
+                }
+
+                await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+                await delay(3000);
+            }
+        } catch (e) {
+            this.logger.error(`Error accepting DM requests: ${e}`);
+        }
+    }
+
     async checkAndRespondToDMs(limits?: { dmsPerHour?: number }) {
         if (!this.page) throw new Error("Page not initialized");
+
+        // --- DM REQUESTS CHECK ---
+        await this.checkAndAcceptDMRequests();
+
         const dmsPerHour = limits?.dmsPerHour || 5;
         // Check local activity tracker here too if needed, but app.ts should handle high level
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
