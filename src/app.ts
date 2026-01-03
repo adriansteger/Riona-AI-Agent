@@ -160,7 +160,9 @@ const processAccount = async (account: any) => {
         username: account.username,
         password: account.password,
         userDataDir: account.userDataDir,
-        proxy: account.proxy
+        proxy: account.proxy,
+        languages: account.settings?.languages,
+        defaultLanguage: account.settings?.defaultLanguage
       }, accountLogger, character);
 
       activeSessions.set(account.id, igClient);
@@ -208,17 +210,20 @@ const processAccount = async (account: any) => {
       }
 
       const maxSessions = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5');
-      const shouldClose = limitsReachedNow && activeSessions.size > maxSessions;
+      // DEBUG: Log the decision factors
+      accountLogger.info(`[SESSION DEBUG] LimitsReached=${limitsReachedNow}, ActiveSessions=${activeSessions.size}, MaxSessions=${maxSessions}`);
+
+      const shouldClose = limitsReachedNow && activeSessions.size >= maxSessions;
 
       if (shouldClose) {
-        accountLogger.info(`Hourly limits reached and session slots full (${activeSessions.size}/${maxSessions}). Closing browser.`);
+        accountLogger.info(`[SESSION DEBUG] Decision: CLOSE. (Limits Reached & Slots Full: ${activeSessions.size} >= ${maxSessions})`);
         await igClient.close();
         activeSessions.delete(account.id);
       } else {
         if (limitsReachedNow) {
-          accountLogger.info(`Hourly limits reached, but keeping browser open (Sessions: ${activeSessions.size}/${maxSessions}).`);
+          accountLogger.info(`[SESSION DEBUG] Decision: KEEP OPEN. (Limits Reached but Slots Available: ${activeSessions.size} < ${maxSessions})`);
         } else {
-          accountLogger.info("Limits not yet reached. Keeping browser open for next cycle.");
+          accountLogger.info("[SESSION DEBUG] Decision: KEEP OPEN. (Limits Not Reached)");
         }
       }
 

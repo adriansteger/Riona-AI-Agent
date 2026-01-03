@@ -36,8 +36,11 @@ export class IgClient {
     private logger: any; // Using any or specific Logger type if available
     private character: any;
 
+    private languages: string[] = ['English'];
+    private defaultLanguage: string = 'English';
+
     constructor(
-        config: { username?: string; password?: string; userDataDir?: string; proxy?: string },
+        config: { username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string },
         loggerInstance?: any,
         character?: any
     ) {
@@ -47,6 +50,8 @@ export class IgClient {
         this.proxy = config.proxy;
         this.logger = loggerInstance || logger;
         this.character = character || {};
+        this.languages = config.languages || ['English'];
+        this.defaultLanguage = config.defaultLanguage || 'English';
     }
 
     public isConnected(): boolean {
@@ -1090,24 +1095,70 @@ export class IgClient {
                     // Scrape conversation
                     // Messages are in div[role="row"] usually? or generic container.
                     // We want the LAST message that is NOT from us.
-                    const lastMessageText = await this.page.evaluate(() => {
+                    // Improve scraping to detect sender
+                    const lastMessageData = await this.page.evaluate(() => {
                         const messages = Array.from(document.querySelectorAll('div[dir="auto"]')); // Text bubbles
                         if (messages.length === 0) return null;
 
-                        // This is tricky without strict selectors for "mine" vs "theirs".
-                        // IG usually puts mine on right, theirs on left.
-                        // But 'div[dir="auto"]' is just content.
-                        // Let's try to grab the very last text bubble found in the main chat area.
-                        // Risk: It might be our own message if we sent last. 
-                        // Safety check: LLM can determine context, or we just reply anyway (double text?)
-                        // Improved: Look for specific message container classes? They change too often.
-                        return messages[messages.length - 1].textContent;
+                        // Iterate backwards to find the last actual message bubble
+                        for (let i = messages.length - 1; i >= 0; i--) {
+                            const node = messages[i];
+                            const text = node.textContent?.trim() || "";
+                            if (!text) continue; // Skip empty nodes
+
+                            // Check ancestry for "My Message" indicators
+                            // My messages usually have a blue/purple background or specific alignment class
+                            let isMine = false;
+                            let el: HTMLElement | null = node as HTMLElement;
+                            let depth = 0;
+
+                            while (el && depth < 6) {
+                                const style = window.getComputedStyle(el);
+                                const bg = style.backgroundColor;
+                                // Instagram Blue variants (solid or gradient components)
+                                // rgb(55, 151, 240), rgb(0, 149, 246), rgb(0, 100, 224) etc.
+                                // Simplest check: High Blue component, Low Red/Green? 
+                                // Or exact match strings.
+                                if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
+                                    isMine = true;
+                                    break;
+                                }
+                                // Check alignment
+                                if (style.alignSelf === 'flex-end' || style.alignItems === 'flex-end') {
+                                    // Careful, sometimes containers align end but content doesn't. 
+                                    // But usually 'flex-end' is strong signal for 'Me'.
+                                    // We can't rely solely on this, but combined with context it helps.
+                                    // Let's stick to color as primary specific signal for now if possible.
+                                }
+                                el = el.parentElement;
+                                depth++;
+                            }
+
+                            // Second pass: If logic above failed, specific selector for "Me" containers?
+                            // IG web classes are obfuscated.
+                            // BUT, "Me" messages are usually on the RIGHT.
+                            // "Theirs" are on the LEFT.
+                            // We can check bounding box X position relative to viewport width?
+                            if (!isMine) {
+                                const rect = node.getBoundingClientRect();
+                                const viewWidth = window.innerWidth;
+                                if (rect.left > viewWidth * 0.5) {
+                                    // Right side -> Likely Me
+                                    isMine = true;
+                                }
+                            }
+
+                            return { text, isMine };
+                        }
+                        return null;
                     });
 
-                    if (lastMessageText) {
+
+
+                    if (lastMessageData && !lastMessageData.isMine) {
+                        const lastMessageText = lastMessageData.text;
                         this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
 
-                        // Generate Response
                         // Generate Response
                         const schema = getInstagramDMResponseSchema();
 
@@ -1127,15 +1178,23 @@ export class IgClient {
                     Your Style/Tone: ${charAdjectives} ${charStyle}
                     
                     You received a DM: "${lastMessageText}"
+
+                    Language Configuration:
+                    - You speak: [${this.languages.join(', ')}]
+                    - Default Language: "${this.defaultLanguage}"
                     
                     Task: Generate a natural response as ${charName}.
                     Guidelines:
+                    - Detect the language of the incoming message.
+                    - If it matches one of your spoken languages above, reply in that language.
+                    - Otherwise, reply in your Default Language (${this.defaultLanguage}).
                     - Keep it concise (1-2 sentences usually).
                     - Match your specific tone and style defined above.
                     - If the message is "hi" or generic, reply in character.
                     - If it's spam, ignore it (return empty string or "IGNORE").
                     - Do not be overly helpful assistant-like; be the character.
                     `;
+
 
                         const result = await runAgent(schema, prompt);
                         // result is typically an array of objects based on schema
