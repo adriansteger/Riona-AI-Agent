@@ -71,6 +71,14 @@ export interface InstagramDMResponseSchema {
         description: string;
         nullable: boolean;
       };
+      memory_updates: {
+        type: SchemaType;
+        description: string;
+        nullable: boolean;
+        items: {
+          type: SchemaType;
+        }
+      };
     };
     required: string[];
   };
@@ -90,11 +98,19 @@ export const getInstagramDMResponseSchema = (): InstagramDMResponseSchema => {
         },
         tone: {
           type: SchemaType.STRING,
-          description: "The tone of the response (e.g., friendly, helpful, witty).",
+          description: "The tone of the response (e.g., flirty, professional, casual).",
           nullable: false,
         },
+        memory_updates: {
+          type: SchemaType.ARRAY,
+          description: "List of new facts learned about the user from this message (e.g. 'Birthday is Oct 5', 'Likes pizza'). Empty if none.",
+          nullable: true,
+          items: {
+            type: SchemaType.STRING
+          }
+        }
       },
-      required: ["response", "tone"],
+      required: ["response", "tone", "memory_updates"],
     },
   };
 };

@@ -14,6 +14,7 @@ import { getInstagramCommentSchema, getInstagramDMResponseSchema } from "../../A
 import readline from "readline";
 import fs from "fs/promises";
 import { getShouldExitInteractions } from '../../api/agent';
+import { Contact } from '../../models/Contact';
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -1096,71 +1097,90 @@ export class IgClient {
                     // Messages are in div[role="row"] usually? or generic container.
                     // We want the LAST message that is NOT from us.
                     // Improve scraping to detect sender
-                    const lastMessageData = await this.page.evaluate(() => {
-                        const messages = Array.from(document.querySelectorAll('div[dir="auto"]')); // Text bubbles
-                        if (messages.length === 0) return null;
 
-                        // Iterate backwards to find the last actual message bubble
-                        for (let i = messages.length - 1; i >= 0; i--) {
+                    // 1. Detect conversation partner username from Header
+                    // Header usually contains h1 or h2 with username
+                    const partnerUsername = await this.page.evaluate(() => {
+                        const headers = Array.from(document.querySelectorAll('h1, h2, h3, span[dir="auto"]'));
+                        // Look for the header text that matches likely a username (simplified)
+                        // Or just grab the text from the top bar ?
+                        // Better: We clicked a thread earlier. The text of that thread usually contains the name. 
+                        // But we lost that ref.
+                        // Let's look for the main header in the conversation column (right pane).
+                        // Usually specific classes.
+                        // Fallback: Use "User" if not found.
+                        const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
+                        return header?.textContent?.trim() || "User";
+                    });
+
+                    // 2. Scrape last 10 messages for context
+                    const history = await this.page.evaluate(() => {
+                        const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
+                        if (messages.length === 0) return [];
+
+                        const historyData = [];
+                        // Iterate backwards, up to 10 valid text bubbles
+                        let count = 0;
+                        for (let i = messages.length - 1; i >= 0 && count < 10; i--) {
                             const node = messages[i];
                             const text = node.textContent?.trim() || "";
-                            if (!text) continue; // Skip empty nodes
+                            if (!text) continue;
 
-                            // Check ancestry for "My Message" indicators
-                            // My messages usually have a blue/purple background or specific alignment class
                             let isMine = false;
                             let el: HTMLElement | null = node as HTMLElement;
                             let depth = 0;
-
                             while (el && depth < 6) {
                                 const style = window.getComputedStyle(el);
                                 const bg = style.backgroundColor;
-                                // Instagram Blue variants (solid or gradient components)
-                                // rgb(55, 151, 240), rgb(0, 149, 246), rgb(0, 100, 224) etc.
-                                // Simplest check: High Blue component, Low Red/Green? 
-                                // Or exact match strings.
                                 if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
                                     isMine = true;
                                     break;
                                 }
-                                // Check alignment
-                                if (style.alignSelf === 'flex-end' || style.alignItems === 'flex-end') {
-                                    // Careful, sometimes containers align end but content doesn't. 
-                                    // But usually 'flex-end' is strong signal for 'Me'.
-                                    // We can't rely solely on this, but combined with context it helps.
-                                    // Let's stick to color as primary specific signal for now if possible.
+                                if ((style.alignSelf === 'flex-end' || style.alignItems === 'flex-end') && !isMine) {
+                                    // isMine = true; // Use cautiously
                                 }
                                 el = el.parentElement;
                                 depth++;
                             }
-
-                            // Second pass: If logic above failed, specific selector for "Me" containers?
-                            // IG web classes are obfuscated.
-                            // BUT, "Me" messages are usually on the RIGHT.
-                            // "Theirs" are on the LEFT.
-                            // We can check bounding box X position relative to viewport width?
                             if (!isMine) {
                                 const rect = node.getBoundingClientRect();
                                 const viewWidth = window.innerWidth;
-                                if (rect.left > viewWidth * 0.5) {
-                                    // Right side -> Likely Me
-                                    isMine = true;
-                                }
+                                if (rect.left > viewWidth * 0.5) isMine = true;
                             }
 
-                            return { text, isMine };
+                            historyData.unshift({ text, isMine }); // Add to front to maintain chronological order
+                            count++;
                         }
-                        return null;
+                        return historyData;
                     });
 
+                    const lastMessage = history[history.length - 1]; // Use local variable, NOT lastMessageData which is removed
+                    // Check if *last* message is ours (Loop Protection)
+                    if (lastMessage && lastMessage.isMine) {
+                        this.logger.info(`Last message detected from ME: "${lastMessage.text.substring(0, 30)}...". Skipping reply.`);
+                    } else if (lastMessage) {
+                        this.logger.info(`Conversation Context (${history.length} msgs). Last from Partner: "${lastMessage.text.substring(0, 30)}..."`);
 
-
-                    if (lastMessageData && !lastMessageData.isMine) {
-                        const lastMessageText = lastMessageData.text;
+                        const lastMessageText = lastMessage.text;
                         this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
 
                         // Generate Response
                         const schema = getInstagramDMResponseSchema();
+
+
+                        // 3. Retrieve Facts from DB
+                        let existingFacts: string[] = [];
+                        if (partnerUsername) {
+                            try {
+                                const contact = await Contact.findOne({ username: partnerUsername });
+                                if (contact && contact.facts) existingFacts = contact.facts;
+                            } catch (err) {
+                                this.logger.warn(`Failed to fetch contact info: ${err}`);
+                            }
+                        }
+
+                        // 4. Format History
+                        const historyText = history.map(h => h.isMine ? `[Me]: ${h.text}` : `[Him]: ${h.text}`).join('\n');
 
                         // Construct Personalized Prompt
                         const charName = this.character?.aiPersona?.name || "User";
@@ -1177,7 +1197,13 @@ export class IgClient {
                     Your Interests: ${charTopics}
                     Your Style/Tone: ${charAdjectives} ${charStyle}
                     
-                    You received a DM: "${lastMessageText}"
+                    You are replying to a DM thread with user: "${partnerUsername}".
+
+                    [KNOWN FACTS ABOUT USER]
+                    ${existingFacts.length > 0 ? existingFacts.map(f => `- ${f}`).join('\n') : "(None yet)"}
+
+                    [CONVERSATION HISTORY (Last 10 messages)]
+                    ${historyText}
 
                     Language Configuration:
                     - You speak: [${this.languages.join(', ')}]
@@ -1193,12 +1219,30 @@ export class IgClient {
                     - If the message is "hi" or generic, reply in character.
                     - If it's spam, ignore it (return empty string or "IGNORE").
                     - Do not be overly helpful assistant-like; be the character.
+                    - IMPORTANT: Extract any NEW permanent facts about the user (e.g. name, age, city, pets, likes, relationships) from the conversation. Return them in the 'memory_updates' field.
                     `;
-
 
                         const result = await runAgent(schema, prompt);
                         // result is typically an array of objects based on schema
                         let responseText = result[0]?.response;
+                        let newFacts = result[0]?.memory_updates || [];
+
+                        // 5. Save New Facts
+                        if (newFacts.length > 0 && partnerUsername) {
+                            try {
+                                await Contact.findOneAndUpdate(
+                                    { username: partnerUsername },
+                                    {
+                                        $addToSet: { facts: { $each: newFacts } },
+                                        $set: { lastInteraction: new Date() }
+                                    },
+                                    { upsert: true, new: true }
+                                );
+                                this.logger.info(`Saved ${newFacts.length} new facts for ${partnerUsername}: ${newFacts.join(', ')}`);
+                            } catch (err) {
+                                this.logger.error(`Failed to save facts: ${err}`);
+                            }
+                        }
 
                         if (responseText && responseText !== "IGNORE") {
                             this.logger.info(`Generated response: "${responseText}"`);
