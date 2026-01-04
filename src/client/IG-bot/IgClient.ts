@@ -264,7 +264,15 @@ export class IgClient {
             });
 
             // "Positive" check: Do we see the Feed or Nav?
-            const isNavPresent = await this.page.$('svg[aria-label="Home"], svg[aria-label="Instagram"]') !== null;
+            // "Instagram" logo is present on public pages too, so we must rely on "Home", "Direct", "Messenger" etc.
+            const isNavPresent = await this.page.evaluate(() => {
+                const home = document.querySelector('svg[aria-label="Home"]');
+                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
+                const create = document.querySelector('svg[aria-label="New Post"]');
+                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
+                const profile = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]'); // unreliable if _sharedData missing
+                return !!(home || direct || create || activity);
+            });
 
             this.logger.info(`Session Check: URL=${currentUrl}, Inputs=${isLoginFieldPresent}, Link=${isLoginLinkPresent}, Button=${isLoginButtonPresent}, Nav=${isNavPresent}`);
 
