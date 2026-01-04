@@ -212,8 +212,52 @@ export class JobClient {
         }
     }
 
-    private async processJobs(jobs: JobData[], platform: string) {
-        logger.info(`Processing ${jobs.length} found jobs for ${platform}...`);
+    private async filterExistingJobs(jobs: JobData[]): Promise<JobData[]> {
+        const apiUrl = process.env.RESUMATE_API_URL; // e.g., .../api/jobs
+        const apiKey = process.env.RESUMATE_API_TOKEN;
+
+        if (!apiUrl || !apiKey || !this.currentTargetUserId) {
+            return jobs; // Without ID or API, we cannot check.
+        }
+
+        const urlsToCheck = jobs.map(j => j.url);
+        if (urlsToCheck.length === 0) return [];
+
+        try {
+            const checkUrl = apiUrl + '/check'; // .../api/jobs/check
+            logger.info(`Checking ${urlsToCheck.length} jobs against API...`);
+
+            const response = await axios.post(checkUrl, {
+                urls: urlsToCheck,
+                targetUserId: this.currentTargetUserId
+            }, {
+                headers: { 'x-api-key': apiKey }
+            });
+
+            if (response.data && Array.isArray(response.data.existing)) {
+                const existing = new Set(response.data.existing);
+                const filtered = jobs.filter(j => !existing.has(j.url));
+                const skippedCount = jobs.length - filtered.length;
+
+                if (skippedCount > 0) {
+                    logger.info(`Skipping ${skippedCount} jobs (already exist in DB for this user).`);
+                }
+                return filtered;
+            }
+        } catch (error: any) {
+            logger.warn(`Failed to check existing jobs API: ${error.message}. Proceeding with all.`);
+        }
+        return jobs;
+    }
+
+    private async processJobs(allJobs: JobData[], platform: string) {
+        // 1. Filter out locally processed (cache)
+        let jobs = allJobs.filter(j => !this.history.isProcessed(j.url));
+
+        // 2. Filter out backend existing (API)
+        jobs = await this.filterExistingJobs(jobs);
+
+        logger.info(`Processing ${jobs.length} new jobs for ${platform}...`);
 
         for (const job of jobs) {
             if (this.history.isProcessed(job.url)) {

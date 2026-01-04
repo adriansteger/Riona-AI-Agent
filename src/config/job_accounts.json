@@ -2,7 +2,7 @@
     "jobBots": [
         {
             "id": "job_bot_main",
-            "enabled": false,
+            "enabled": true,
             "preferences": {
                 "keywords": [
                     "Software Engineer",
