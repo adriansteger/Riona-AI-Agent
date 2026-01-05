@@ -36,7 +36,7 @@ export class EmailService {
         this.transporter = nodemailer.createTransport(transportOptions);
     }
 
-    async sendJobAlert(jobTitle: string, jobCompany: string, jobUrl: string, platform: string) {
+    async sendJobAlert(jobTitle: string, jobCompany: string, jobUrl: string, platform: string, toEmail: string) {
         const subject = `🔥 New Job Alert: ${jobTitle} at ${jobCompany}`;
         const html = `
             <h2>New Job Found on ${platform}</h2>
@@ -47,13 +47,16 @@ export class EmailService {
             <p><em>Sent by Riona AI Agent</em></p>
         `;
 
+        const mailOptions = {
+            from: this.config.user,
+            to: toEmail,
+            subject: subject,
+            html: html
+        };
+
         try {
-            await this.transporter.sendMail({
-                from: this.config.user,
-                to: this.config.to,
-                subject: subject,
-                html: html
-            });
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`Email sent to ${toEmail}`);
             logger.info(`Email alert sent for job: ${jobTitle}`);
         } catch (error) {
             logger.error(`Failed to send email alert: ${error}`);

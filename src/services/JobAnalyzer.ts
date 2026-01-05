@@ -24,7 +24,7 @@ export class JobAnalyzer {
         return key;
     }
 
-    async analyzeJob(jobTitle: string, company: string, jobDescription: string = ""): Promise<{ score: number, summary: string, isRelevant: boolean }> {
+    async analyzeJob(jobTitle: string, company: string, description: string = "", targetTitle: string, targetPensum?: string): Promise<{ score: number, summary: string, isRelevant: boolean }> {
         const apiKey = this.getNextKey();
         if (!apiKey) {
             return { score: 100, summary: "AI Analysis Disabled", isRelevant: true };
@@ -35,14 +35,19 @@ export class JobAnalyzer {
             // Use 'gemini-pro' as it is the stable general model for text
             const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
+            const pensumInstruction = targetPensum
+                ? `The user specifically wants a workload of "${targetPensum}". If the job is clearly different (e.g. 100% vs 40%), score it lower.`
+                : "Pensum is flexible.";
+
             const prompt = `
-            Act as a career coach. Analyze this job posting for a user looking for "Software Engineer" roles (Remote/Hybrid preferred).
+            Act as a career coach. Analyze this job posting for a user looking for "${targetTitle}" roles.
+            ${pensumInstruction}
             
             Job: ${jobTitle} at ${company}
-            Description Snippet: ${jobDescription.substring(0, 500)}...
+            Description Snippet: ${description.substring(0, 800)}...
 
             Return a valid JSON object (no markdown) with:
-            - "score" (0-100 relevance)
+            - "score" (0-100 relevance). High score ONLY if title and pensum match well.
             - "summary" (one sentence summary)
             - "isRelevant" (boolean, true if score > 60)
             `;

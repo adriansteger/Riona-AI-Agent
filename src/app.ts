@@ -320,10 +320,13 @@ const runJobBot = async () => {
     const emailService = new EmailService(emailConfig);
 
     // Default config (will be overridden by ResuMate API)
+    // Use platforms defined in job_accounts.json (first bot)
+    const platforms = jobConfig.jobBots?.[0]?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
+
     const defaultJobConfig = {
       keywords: [],
       location: 'Remote',
-      platforms: ['indeed', 'ziprecruiter', 'weworkremotely']
+      platforms: platforms
     };
 
     const client = new JobClient(emailService, defaultJobConfig);

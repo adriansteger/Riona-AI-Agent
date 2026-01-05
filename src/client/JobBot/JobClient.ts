@@ -19,6 +19,7 @@ interface JobConfig {
     location: string | string[];
     platforms: string[];
     pensum?: string; // Added for User Preferences
+    email?: string; // Added for specific email alerts
 }
 
 interface JobData {
@@ -82,6 +83,7 @@ export class JobClient {
             logger.warn("Browser disconnected/closed unexpectedly.");
             this.browser = null;
             this.page = null;
+            this.detailsPage = null; // Reset details page
         });
 
         this.page = await this.browser.newPage();
@@ -106,6 +108,9 @@ export class JobClient {
     async close() {
         if (this.browser) {
             await this.browser.close();
+            this.browser = null; // Ensure nullified
+            this.page = null;
+            this.detailsPage = null;
         }
     }
 
@@ -134,11 +139,24 @@ export class JobClient {
                 continue;
             }
 
+            const keywords = [title];
+            // Append pensum to keywords if defined (e.g. "80-100%")
+            if (user.preferences?.pensum) {
+                keywords.push(user.preferences.pensum);
+            }
+
+            const location = user.preferences?.location;
+            if (!location) {
+                logger.warn(`   Skipping user ${user.name} - No Job Location defined.`);
+                continue;
+            }
+
             this.config = {
-                keywords: [title], // Strict title usage
-                location: user.preferences?.location || this.originalConfig.location,
+                keywords: keywords,
+                location: location,
                 platforms: this.originalConfig.platforms,
-                pensum: user.preferences?.pensum // Store pensum preference
+                pensum: user.preferences?.pensum, // Store pensum preference
+                email: user.email // Store user email
             };
 
             logger.info(`   Target: ${this.config.keywords[0]} in ${this.config.location} (Pensum: ${this.config.pensum || 'Any'})`);
@@ -188,18 +206,16 @@ export class JobClient {
 
                     let jobs: JobData[] = [];
 
-                    switch (platform) {
-                        case 'indeed':
-                            jobs = await this.searchIndeed(location);
-                            break;
-                        case 'ziprecruiter':
-                            jobs = await this.searchZipRecruiter(location);
-                            break;
-                        case 'weworkremotely':
-                            jobs = await this.searchWeWorkRemotely(location);
-                            break;
-                        default:
-                            logger.warn(`Unknown or unsupported platform: ${platform}`);
+                    const normalizedPlatform = platform.toLowerCase();
+
+                    if (normalizedPlatform.includes('indeed')) {
+                        jobs = await this.searchIndeed(location);
+                    } else if (normalizedPlatform.includes('ziprecruiter')) {
+                        jobs = await this.searchZipRecruiter(location);
+                    } else if (normalizedPlatform.includes('weworkremotely')) {
+                        jobs = await this.searchWeWorkRemotely(location);
+                    } else {
+                        logger.warn(`Unknown or unsupported platform: ${platform}`);
                     }
 
                     await this.processJobs(jobs, platform);
@@ -236,7 +252,16 @@ export class JobClient {
 
             if (response.data && Array.isArray(response.data.existing)) {
                 const existing = new Set(response.data.existing);
-                const filtered = jobs.filter(j => !existing.has(j.url));
+                const filtered = jobs.filter(j => {
+                    const cleanUrl = j.url.split('&')[0].split('?')[0]; // Simple clean for API check context if needed, but better to rely on exact match?
+                    // Actually, let's trust the API to handle the logic or matching.
+                    // But here we are filtering based on what the API returned as "existing"
+                    return !existing.has(j.url);
+                });
+
+                // Also locally filter out if we have processed this "clean" version before?
+                // No, sticking to exact URL from API resp for now.
+
                 const skippedCount = jobs.length - filtered.length;
 
                 if (skippedCount > 0) {
@@ -244,15 +269,52 @@ export class JobClient {
                 }
                 return filtered;
             }
+            return jobs; // If API response is not successful or not an array, return all jobs
         } catch (error: any) {
             logger.warn(`Failed to check existing jobs API: ${error.message}. Proceeding with all.`);
         }
         return jobs;
     }
 
+    // Helper to get stable ID from URL
+    private extractJobId(url: string): string {
+        try {
+            const urlObj = new URL(url);
+
+            // Indeed: Use 'jk' parameter
+            if (url.includes('indeed')) {
+                const jk = urlObj.searchParams.get('jk');
+                if (jk) return `indeed:${jk}`;
+            }
+
+            // ZipRecruiter: Use last path segment or specific ID
+            if (url.includes('ziprecruiter')) {
+                // e.g. .../jobs/123-title-text
+                const parts = urlObj.pathname.split('/');
+                const id = parts[parts.length - 1];
+                if (id) return `ziprecruiter:${id}`;
+            }
+
+            // Fallback: Use URL without query params
+            return url.split('?')[0];
+        } catch (e) {
+            return url; // Return original if parsing fails
+        }
+    }
+
     private async processJobs(allJobs: JobData[], platform: string) {
-        // 1. Filter out locally processed (cache)
-        let jobs = allJobs.filter(j => !this.history.isProcessed(j.url));
+        // 1. Filter out locally processed (cache) using Stable IDs
+        let jobs = allJobs.filter(j => {
+            const stableId = this.extractJobId(j.url);
+            if (this.history.isProcessed(stableId)) {
+                return false;
+            }
+            // Also check raw URL for backward compatibility
+            if (this.history.isProcessed(j.url)) {
+                return false;
+            }
+            return true;
+        });
 
         // 2. Filter out backend existing (API)
         jobs = await this.filterExistingJobs(jobs);
@@ -260,68 +322,94 @@ export class JobClient {
         logger.info(`Processing ${jobs.length} new jobs for ${platform}...`);
 
         for (const job of jobs) {
-            if (this.history.isProcessed(job.url)) {
-                logger.info(`Skipping duplicate job: ${job.title}`);
-                continue;
-            }
+            try {
+                if (this.history.isProcessed(job.url)) { // Double check
+                    logger.info(`Skipping duplicate job: ${job.title}`);
+                    continue;
+                }
 
-            // Deep Scrape: Visit the job page to get the description
-            logger.info(`Visiting job page for details: ${job.title}...`);
-            const details = await this.scrapeJobDetails(job.url, platform);
+                // Deep Scrape: Visit the job page to get the description
+                logger.info(`Visiting job page for details: ${job.title}...`);
+                const details = await this.scrapeJobDetails(job.url, platform);
 
-            // AI Analysis with FULL description
-            logger.info(`Analyzing job with AI...`);
-            const analysis = await this.analyzer.analyzeJob(job.title, job.company, details.description);
-
-            if (analysis.isRelevant) {
-                logger.info(`Job Match! Score: ${analysis.score}. Sending email.`);
-                await this.emailService.sendJobAlert(
-                    `${job.title} [AI Score: ${analysis.score}]`,
+                // AI Analysis with FULL description
+                logger.info(`Analyzing job with AI... (Target: "${this.config.keywords[0]}", Pensum: "${this.config.pensum}")`);
+                const analysis = await this.analyzer.analyzeJob(
+                    job.title,
                     job.company,
-                    job.url,
-                    `${platform} (Summary: ${analysis.summary})`
+                    details.description,
+                    this.config.keywords[0], // targetTitle (e.g. "Verkäufer")
+                    this.config.pensum       // targetPensum (e.g. "40%")
                 );
 
-                // --- ResuMate Integration ---
-                await this.postToResuMate(job, details, platform, analysis.score);
+                if (analysis.isRelevant) {
+                    logger.info(`Job Match! Score: ${analysis.score}. Sending email.`);
+                    await this.emailService.sendJobAlert(
+                        job.title,
+                        job.company,
+                        job.url,
+                        platform,
+                        this.config.email || process.env.EMAIL_USER || "" // Fallback to sender if no email
+                    );
 
-                this.history.addProcessed(job.url);
-            } else {
-                logger.info(`Job ignored by AI (Score ${analysis.score}): ${job.title}`);
-                this.history.addProcessed(job.url);
+                    // --- ResuMate Integration ---
+                    await this.postToResuMate(job, details, platform, analysis.score);
+
+                    const stableId = this.extractJobId(job.url);
+                    this.history.addProcessed(stableId);
+                    this.history.addProcessed(job.url);
+                } else {
+                    logger.info(`Job ignored by AI (Score ${analysis.score}): ${job.title}`);
+                    const stableId = this.extractJobId(job.url);
+                    this.history.addProcessed(stableId);
+                    this.history.addProcessed(job.url);
+                }
+            } catch (error) {
+                logger.error(`Error processing job ${job.title}: ${error}`);
             }
         }
     }
 
+    private detailsPage: any;
+
     private async scrapeJobDetails(url: string, platform: string): Promise<{ description: string, salary?: string, location?: string, pensum?: string }> {
-        let detailsPage: any;
         try {
             await this.ensureBrowser(); // Ensure browser is alive
-            detailsPage = await this.browser.newPage();
-            // Random reliable UA
-            await detailsPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            await detailsPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+            // Reuse details page or create if missing
+            if (!this.detailsPage || this.detailsPage.isClosed()) {
+                this.detailsPage = await this.browser.newPage();
+                // Random reliable UA
+                await this.detailsPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            }
+
+            const page = this.detailsPage;
+            // Clear cookies/data? Maybe not needed if we want persistence.
+            // Navigate
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
             await new Promise(r => setTimeout(r, 2000)); // Human pause reading
 
-            const data = await detailsPage.evaluate((platform: string) => {
+            const data = await page.evaluate((platform: string) => {
                 let descSelector = '';
                 let salarySelector = '';
                 let locSelector = '';
                 let pensumSelector = '';
 
-                if (platform === 'indeed') {
+                const normPlatform = platform.toLowerCase();
+
+                if (normPlatform.includes('indeed')) {
                     descSelector = '#jobDescriptionText';
                     salarySelector = '#salaryInfoAndJobType, .salary-snippet-container';
                     locSelector = '[data-testid="inlineHeader-companyLocation"], .jobsearch-JobInfoHeader-subtitle > div:last-child';
                     pensumSelector = '#salaryInfoAndJobType > span:nth-child(2), [data-testid="job-type"]'; // heuristic
                 }
-                else if (platform === 'ziprecruiter') {
+                else if (normPlatform.includes('ziprecruiter')) {
                     descSelector = '.job_description, .job_content';
                     salarySelector = '.salary_text';
                     pensumSelector = '.job_details .employment_type';
                 }
-                else if (platform === 'weworkremotely') {
+                else if (normPlatform.includes('weworkremotely')) {
                     descSelector = '.listing-container';
                     pensumSelector = '.listing-header-container .listing-tag'; // often contains "Full-Time"
                 }
@@ -343,7 +431,7 @@ export class JobClient {
                 };
             }, platform);
 
-            await detailsPage.close();
+            // Do NOT close page, we reuse it.
             return {
                 description: data.description || "No description found.",
                 salary: data.salary,
@@ -353,7 +441,8 @@ export class JobClient {
 
         } catch (error) {
             logger.warn(`Failed to scrape details for ${url}: ${error}`);
-            if (detailsPage && !detailsPage.isClosed()) await detailsPage.close();
+            // If error, maybe page is dead? Check.
+            if (this.detailsPage && this.detailsPage.isClosed()) this.detailsPage = null; // Reset if closed
             return { description: "Failed to scrape description." };
         }
     }
@@ -377,48 +466,74 @@ export class JobClient {
     private async searchIndeed(location: string) {
         logger.info(`Starting Indeed Job Search for ${location}...`);
         const query = this.config.keywords.join(' ');
-        const url = `https://ch.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}`;
 
-        await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-        await new Promise(r => setTimeout(r, 3000));
+        let allJobs: JobData[] = [];
+        const MAX_PAGES = 5;
 
-        try {
-            await this.page.waitForSelector('#mosaic-provider-jobcards', { timeout: 10000 });
-        } catch (e) {
-            logger.warn("Indeed: Main job container not found.");
-            await this.takeScreenshot('indeed-blocked');
-            return [];
+        for (let page = 0; page < MAX_PAGES; page++) {
+            const startParam = page * 10;
+            const url = `https://ch.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location)}&start=${startParam}`;
+
+            logger.info(`Scanning Indeed page ${page + 1}...`);
+
+            try {
+                await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+                await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000)); // Variable wait
+
+                try {
+                    await this.page.waitForSelector('#mosaic-provider-jobcards', { timeout: 10000 });
+                } catch (e) {
+                    logger.warn(`Indeed: Job list container not found on page ${page + 1}. Stopping pagination.`);
+                    break;
+                }
+
+                const pageJobs = await this.page.evaluate(() => {
+                    const results: any[] = [];
+                    const cards = document.querySelectorAll('#mosaic-provider-jobcards ul > li');
+
+                    cards.forEach(card => {
+                        if (card.querySelector('.mosaic-zone')) return;
+
+                        const titleEl = card.querySelector('h2.jobTitle') || card.querySelector('h2');
+
+                        let companyEl = card.querySelector('[data-testid="company-name"]');
+                        if (!companyEl) companyEl = card.querySelector('.companyName');
+                        if (!companyEl) companyEl = card.querySelector('.company_location [class*="companyName"]');
+
+                        let linkEl = card.querySelector('a.jcs-JobTitle');
+                        if (!linkEl && titleEl) linkEl = titleEl.closest('a') || titleEl.querySelector('a');
+                        if (!linkEl) linkEl = card.querySelector('a[id^="job_"]');
+
+                        if (titleEl && linkEl) {
+                            results.push({
+                                title: titleEl.textContent?.trim(),
+                                company: companyEl ? companyEl.textContent?.trim() : "Unknown Company (Indeed)",
+                                url: (linkEl as HTMLAnchorElement).href
+                            });
+                        }
+                    });
+                    return results;
+                });
+
+                if (pageJobs.length === 0) {
+                    logger.info("No jobs found on this page. Stopping pagination.");
+                    break;
+                }
+
+                logger.info(`Found ${pageJobs.length} jobs on page ${page + 1}.`);
+                allJobs = allJobs.concat(pageJobs);
+
+                // Stop if we see duplicates relative to what we just found? 
+                // No, rely on global de-dupe later. But if page yields 0 new jobs compared to prev, maybe stop?
+                // For now, simple page count is safe.
+
+            } catch (error) {
+                logger.error(`Error scraping Indeed page ${page + 1}: ${error}`);
+                break;
+            }
         }
 
-        return await this.page.evaluate(() => {
-            const results: any[] = [];
-            const cards = document.querySelectorAll('#mosaic-provider-jobcards ul > li');
-
-            cards.forEach(card => {
-                if (card.querySelector('.mosaic-zone')) return;
-
-                const titleEl = card.querySelector('h2.jobTitle') || card.querySelector('h2');
-
-                // NEW: Use data-testid which is more stable
-                let companyEl = card.querySelector('[data-testid="company-name"]');
-                // Fallback to old selectors just in case
-                if (!companyEl) companyEl = card.querySelector('.companyName');
-                if (!companyEl) companyEl = card.querySelector('.company_location [class*="companyName"]');
-
-                let linkEl = card.querySelector('a.jcs-JobTitle');
-                if (!linkEl && titleEl) linkEl = titleEl.closest('a') || titleEl.querySelector('a');
-                if (!linkEl) linkEl = card.querySelector('a[id^="job_"]');
-
-                if (titleEl && linkEl) {
-                    results.push({
-                        title: titleEl.textContent?.trim(),
-                        company: companyEl ? companyEl.textContent?.trim() : "Unknown Company (Indeed)",
-                        url: (linkEl as HTMLAnchorElement).href
-                    });
-                }
-            });
-            return results;
-        });
+        return allJobs;
     }
 
     private async searchZipRecruiter(location: string) {

@@ -4,12 +4,6 @@
             "id": "job_bot_main",
             "enabled": true,
             "preferences": {
-                "keywords": [
-                    "Software Engineer",
-                    "TypeScript",
-                    "Remote"
-                ],
-                "location": "Remote",
                 "platforms": [
                     "indeed",
                     "ziprecruiter",

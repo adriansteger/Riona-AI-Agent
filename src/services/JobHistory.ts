@@ -29,6 +29,9 @@ export class JobHistory {
     private loadHistory(): Config {
         try {
             const data = fs.readFileSync(this.filePath, 'utf-8');
+            if (!data || data.trim() === '') {
+                return { searched_jobs: [] };
+            }
             return JSON.parse(data);
         } catch (error) {
             logger.error(`Failed to load job history: ${error}`);

@@ -4,21 +4,8 @@
             "id": "job_bot_main",
             "enabled": true,
             "preferences": {
-                "keywords": [
-                    "Software Engineer",
-                    "TypeScript",
-                    "Remote"
-                ],
-                "location": [
-                    "Remote",
-                    "Zürich",
-                    "Schlieren"
-                ],
                 "platforms": [
-                    "indeed.ch",
-                    "indeed",
-                    "ziprecruiter",
-                    "weworkremotely"
+                    "indeed.ch"
                 ]
             },
             "emailConfig": {
