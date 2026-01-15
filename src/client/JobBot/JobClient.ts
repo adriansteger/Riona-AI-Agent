@@ -1,5 +1,7 @@
 import puppeteer from 'puppeteer-extra';
+import { HTTPRequest } from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import AdblockerPlugin from 'puppeteer-extra-plugin-adblocker';
 import logger from '../../config/logger';
 import { EmailService } from '../../services/EmailService';
 import { JobAnalyzer } from '../../services/JobAnalyzer';
@@ -13,6 +15,11 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 puppeteer.use(StealthPlugin());
+puppeteer.use(
+    AdblockerPlugin({
+        blockTrackers: true,
+    })
+);
 
 interface JobConfig {
     keywords: string[];
@@ -72,6 +79,8 @@ export class JobClient {
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding',
+                // Essential for Windows to prevent "Occluded" status
+                '--disable-features=CalculateNativeWinOcclusion',
             ],
             ignoreHTTPSErrors: true
         } as any);
@@ -87,6 +96,9 @@ export class JobClient {
         });
 
         this.page = await this.browser.newPage();
+
+
+
         await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await this.page.setViewport({ width: 1920, height: 1080 });
     }
@@ -98,10 +110,13 @@ export class JobClient {
             }
             if (!this.page || this.page.isClosed()) {
                 this.page = await this.browser.newPage();
+
+
+
                 await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
             }
         } catch (e) {
-            logger.error(`Failed to ensure browser: ${e}`);
+            logger.error(`Failed to ensure browser: ${e} `);
         }
     }
 
@@ -124,10 +139,10 @@ export class JobClient {
             return;
         }
 
-        logger.info(`>>> Processing ${proUsers.length} Users... <<<`);
+        logger.info(`>>> Processing ${proUsers.length} Users... << <`);
 
         for (const user of proUsers) {
-            logger.info(`\n=== Processing User: ${user.name} (${user.id}) ===`);
+            logger.info(`\n === Processing User: ${user.name} (${user.id}) === `);
             this.currentTargetUserId = user.id;
 
             // Map user preferences to config
@@ -180,7 +195,7 @@ export class JobClient {
             // Endpoint: [API_URL]/../admin/pro-users
             const adminUrl = apiUrl.replace('/jobs', '/admin/pro-users');
 
-            logger.info(`Fetching User Queue from: ${adminUrl}`);
+            logger.info(`Fetching User Queue from: ${adminUrl} `);
             const response = await axios.get(adminUrl, {
                 headers: { 'x-api-key': apiKey }
             });
@@ -189,7 +204,7 @@ export class JobClient {
                 return response.data.users;
             }
         } catch (error: any) {
-            logger.error(`Failed to fetch User Queue: ${error.message}`);
+            logger.error(`Failed to fetch User Queue: ${error.message} `);
         }
         return [];
     }
@@ -198,7 +213,7 @@ export class JobClient {
         const locations = Array.isArray(this.config.location) ? this.config.location : [this.config.location];
 
         for (const location of locations) {
-            logger.info(`--- Searching jobs in: ${location} ---`);
+            logger.info(`-- - Searching jobs in: ${location} --- `);
 
             for (const platform of this.config.platforms) {
                 try {
@@ -215,13 +230,13 @@ export class JobClient {
                     } else if (normalizedPlatform.includes('weworkremotely')) {
                         jobs = await this.searchWeWorkRemotely(location);
                     } else {
-                        logger.warn(`Unknown or unsupported platform: ${platform}`);
+                        logger.warn(`Unknown or unsupported platform: ${platform} `);
                     }
 
                     await this.processJobs(jobs, platform);
 
                 } catch (error) {
-                    logger.error(`Error running search for ${platform} in ${location}: ${error}`);
+                    logger.error(`Error running search for ${platform} in ${location}: ${error} `);
                     await this.close();
                 }
             }
@@ -265,7 +280,7 @@ export class JobClient {
                 const skippedCount = jobs.length - filtered.length;
 
                 if (skippedCount > 0) {
-                    logger.info(`Skipping ${skippedCount} jobs (already exist in DB for this user).`);
+                    logger.info(`Skipping ${skippedCount} jobs(already exist in DB for this user).`);
                 }
                 return filtered;
             }
@@ -284,7 +299,7 @@ export class JobClient {
             // Indeed: Use 'jk' parameter
             if (url.includes('indeed')) {
                 const jk = urlObj.searchParams.get('jk');
-                if (jk) return `indeed:${jk}`;
+                if (jk) return `indeed:${jk} `;
             }
 
             // ZipRecruiter: Use last path segment or specific ID
@@ -292,7 +307,7 @@ export class JobClient {
                 // e.g. .../jobs/123-title-text
                 const parts = urlObj.pathname.split('/');
                 const id = parts[parts.length - 1];
-                if (id) return `ziprecruiter:${id}`;
+                if (id) return `ziprecruiter:${id} `;
             }
 
             // Fallback: Use URL without query params
@@ -303,8 +318,18 @@ export class JobClient {
     }
 
     private async processJobs(allJobs: JobData[], platform: string) {
+        // 0. Deduplicate input list (Self-Dedup)
+        const uniqueJobsMap = new Map<string, JobData>();
+        for (const j of allJobs) {
+            const stableId = this.extractJobId(j.url);
+            if (!uniqueJobsMap.has(stableId)) {
+                uniqueJobsMap.set(stableId, j);
+            }
+        }
+        const uniqueJobs = Array.from(uniqueJobsMap.values());
+
         // 1. Filter out locally processed (cache) using Stable IDs
-        let jobs = allJobs.filter(j => {
+        let jobs = uniqueJobs.filter(j => {
             const stableId = this.extractJobId(j.url);
             if (this.history.isProcessed(stableId)) {
                 return false;
@@ -323,8 +348,9 @@ export class JobClient {
 
         for (const job of jobs) {
             try {
-                if (this.history.isProcessed(job.url)) { // Double check
-                    logger.info(`Skipping duplicate job: ${job.title}`);
+                const currentStableId = this.extractJobId(job.url);
+                if (this.history.isProcessed(currentStableId)) { // Double check with Stable ID
+                    logger.info(`Skipping duplicate job: ${job.title} `);
                     continue;
                 }
 
@@ -359,13 +385,13 @@ export class JobClient {
                     this.history.addProcessed(stableId);
                     this.history.addProcessed(job.url);
                 } else {
-                    logger.info(`Job ignored by AI (Score ${analysis.score}): ${job.title}`);
+                    logger.info(`Job ignored by AI(Score ${analysis.score}): ${job.title} `);
                     const stableId = this.extractJobId(job.url);
                     this.history.addProcessed(stableId);
                     this.history.addProcessed(job.url);
                 }
             } catch (error) {
-                logger.error(`Error processing job ${job.title}: ${error}`);
+                logger.error(`Error processing job ${job.title}: ${error} `);
             }
         }
     }
@@ -440,7 +466,7 @@ export class JobClient {
             };
 
         } catch (error) {
-            logger.warn(`Failed to scrape details for ${url}: ${error}`);
+            logger.warn(`Failed to scrape details for ${url}: ${error} `);
             // If error, maybe page is dead? Check.
             if (this.detailsPage && this.detailsPage.isClosed()) this.detailsPage = null; // Reset if closed
             return { description: "Failed to scrape description." };
@@ -453,13 +479,13 @@ export class JobClient {
             if (!fs.existsSync(screenshotsDir)) {
                 fs.mkdirSync(screenshotsDir, { recursive: true });
             }
-            const filepath = path.join(screenshotsDir, `${name}-${Date.now()}.png`);
+            const filepath = path.join(screenshotsDir, `${name} -${Date.now()}.png`);
             if (this.page && !this.page.isClosed()) {
                 await this.page.screenshot({ path: filepath, fullPage: false });
-                logger.info(`Saved debug screenshot: ${filepath}`);
+                logger.info(`Saved debug screenshot: ${filepath} `);
             }
         } catch (error) {
-            logger.error(`Failed to take screenshot: ${error}`);
+            logger.error(`Failed to take screenshot: ${error} `);
         }
     }
 

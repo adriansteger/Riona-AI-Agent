@@ -333,7 +333,7 @@ const runJobBot = async () => {
 
     await client.init();
     await client.runSearch();
-    await client.close();
+    // await client.close(); // Keep browser open per user request for persistence
 
   } catch (error) {
     logger.error(`Error in Job Bot: ${error}`);

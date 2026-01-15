@@ -18,12 +18,12 @@ import { Contact } from '../../models/Contact';
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
-// puppeteerExtra.use(
-//     AdblockerPlugin({
-//         // Optionally enable Cooperative Mode for several request interceptors
-//         interceptResolutionPriority: puppeteer.DEFAULT_INTERCEPT_RESOLUTION_PRIORITY,
-//     })
-// );
+puppeteerExtra.use(
+    AdblockerPlugin({
+        // Optionally enable Cooperative Mode for several request interceptors
+        interceptResolutionPriority: puppeteer.DEFAULT_INTERCEPT_RESOLUTION_PRIORITY,
+    })
+);
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,7 +86,7 @@ export class IgClient {
             '--mute-audio', // Good practice
             // Critical stability flags for avoiding TargetCloseError with Stealth Plugin
             '--disable-ipc-flooding-protection',
-            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-features=IsolateOrigins,site-per-process,CalculateNativeWinOcclusion', // Optimized for background
             '--disable-renderer-backgrounding',
             // Prevent Chrome from pausing when minimized/backgrounded
             '--disable-background-timer-throttling',
