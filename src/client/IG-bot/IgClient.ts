@@ -348,12 +348,24 @@ export class IgClient {
         await this.page.goto("https://www.instagram.com/", {
             waitUntil: "networkidle2",
         });
+
+        // Robust Check: verifying if we are truly logged in
+        // We look for the "Home", "Search" or "Profile" icons which only appear for logged-in users.
+        const isLoggedIn = await this.page.evaluate(() => {
+            const homeIcon = document.querySelector('svg[aria-label="Home"]');
+            const searchIcon = document.querySelector('svg[aria-label="Search"]');
+            const profileLink = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]');
+            const navBar = document.querySelector('div[role="navigation"]');
+
+            return !!(homeIcon || searchIcon || profileLink || navBar);
+        });
+
         const url = this.page.url();
-        if (url.includes("/login/")) {
-            logger.warn("Cookies are invalid or expired. Falling back to credentials login.");
+        if (!isLoggedIn || url.includes("/login/")) {
+            logger.warn("Cookies are invalid (Login elements missing). Falling back to credentials login.");
             await this.loginWithCredentials();
         } else {
-            logger.info("Successfully logged in with cookies.");
+            logger.info("Successfully logged in with cookies (Session Verified).");
         }
     }
 
