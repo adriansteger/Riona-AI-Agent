@@ -1337,27 +1337,35 @@ export class IgClient {
         this.logger.info(`Selected hashtag: #${tag}`);
 
         try {
-            await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "networkidle2" });
-            await delay(3000);
+            this.logger.info(`Navigating to hashtag page: #${tag}`);
+            await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
+
+            // Allow hydration time (essential for React)
+            this.logger.info("Waiting for page hydration...");
+            await delay(5000);
+
+            // Scroll down to trigger lazy-loaded grid
+            await this.page.evaluate(() => window.scrollBy(0, 300));
+            await delay(2000);
 
             // Check if tag page loaded (posts exist)
             // Selector for the first post in the grid (Top Posts or Most Recent)
             // Typically: _aagw is the image container class. 
             // Better to select by anchor tag in the grid.
             // Start with robust selectors for the grid
-            // 1. main tag containing links to posts
-            // 2. generic links to /p/ (posts)
+            // 1. Generic links to /p/ (posts) inside Main (Best)
+            // 2. Any link to /p/ (Fallback)
             const postSelectors = [
-                'main article a[href*="/p/"]',
-                'main a[href*="/p/"]',
-                'div._aagw', // Common class for image containers, parent usually has link
-                'a[href^="/p/"]' // Fallback
+                'main a[href^="/p/"]',
+                'a[href^="/p/"]',
+                'div._aagw', // Legacy container
+                'article a[role="link"]'
             ];
 
             let firstPost = null;
             for (const selector of postSelectors) {
                 try {
-                    await this.page.waitForSelector(selector, { timeout: 5000 });
+                    await this.page.waitForSelector(selector, { timeout: 4000 });
                     firstPost = await this.page.$(selector);
                     if (firstPost) {
                         this.logger.info(`Found post using selector: ${selector}`);
@@ -1367,7 +1375,8 @@ export class IgClient {
             }
 
             if (!firstPost) {
-                this.logger.error("No posts found for this hashtag with any selector.");
+                const currentUrl = this.page.url();
+                this.logger.error(`No posts found on ${currentUrl} using selectors: ${postSelectors.join(', ')}`);
                 await this.page.screenshot({ path: `logs/debug_hashtag_${tag}_error.png` });
                 const body = await this.page.evaluate(() => document.body.innerHTML.substring(0, 1000));
                 this.logger.error(`Debug HTML: ${body}`);
