@@ -94,7 +94,7 @@ const processAccount = async (account: any) => {
 
     // --- SETTINGS MERGE ---
     // 1. Get defaults from Character (or hard defaults)
-    const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true };
+    const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true, enableCommentLikes: false };
     const characterLimits = character?.limits || { likesPerHour: 10, commentsPerHour: 5 };
 
     // 2. Get overrides from Account Config (accounts.json)

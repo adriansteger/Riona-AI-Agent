@@ -61,8 +61,27 @@ export class JobClient {
     async init() {
         if (this.browser && this.browser.isConnected()) return;
 
+        // Fix for Raspberry Pi: Use system Chromium if bundled Chrome fails (ARM vs x86)
+        let executablePath: string | undefined;
+        if (process.platform === 'linux') {
+            try {
+                const fs = require('fs');
+                const commonPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome-stable'];
+                for (const p of commonPaths) {
+                    if (fs.existsSync(p)) {
+                        logger.info(`Found system browser at ${p}. Using it instead of bundled Chrome.`);
+                        executablePath = p;
+                        break;
+                    }
+                }
+            } catch (e) {
+                logger.warn(`Failed to detect system browser: ${e}`);
+            }
+        }
+
         logger.info("Initializing Browser for Job Search...");
         this.browser = await puppeteer.launch({
+            executablePath,
             headless: false,
             defaultViewport: null,
             args: [

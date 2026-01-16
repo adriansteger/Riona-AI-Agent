@@ -1324,11 +1324,11 @@ export class IgClient {
     }
 
     async interactWithHashtags(hashtags: string[], options: {
-        behavior?: { enableLikes?: boolean; enableComments?: boolean; },
+        behavior?: { enableLikes?: boolean; enableComments?: boolean; enableCommentLikes?: boolean; };
         limits?: { likesPerHour?: number; commentsPerHour?: number; }
     } = {}) {
         if (!this.page) throw new Error("Page not initialized");
-        const { behavior = { enableLikes: true, enableComments: true }, limits } = options;
+        const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: false }, limits } = options;
 
         if (!hashtags || hashtags.length === 0) {
             this.logger.warn("No hashtags provided for interaction.");
@@ -1418,7 +1418,9 @@ export class IgClient {
                 if (canLike) {
                     try {
                         // Wait for like button to be visible in the modal
-                        const likeSelector = 'article[role="presentation"] svg[aria-label="Like"]';
+                        // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
+                        // Structure: section (actions) -> span -> button -> svg[aria-label="Like"]
+                        const likeSelector = 'section svg[aria-label="Like"]';
                         // Note: 'article[role="presentation"]' targets the modal content
 
                         const likeButton = await this.page.$(likeSelector);
@@ -1441,6 +1443,40 @@ export class IgClient {
                         }
                     } catch (e) {
                         this.logger.warn(`Error liking post in hashtag mode: ${e}`);
+                    }
+
+                    // --- COMMENT LIKING LOGIC (New Feature) ---
+                    if (behavior.enableCommentLikes) {
+                        try {
+                            const commentLikeSelectors = [
+                                'ul svg[aria-label="Like"]', // Standard comment list
+                                'div[role="button"] svg[aria-label="Like"]' // Buttons
+                            ];
+                            // Exclude the main post like button (found in 'section')
+                            // We look for likes that are NOT in a section
+
+                            const allLikeButtons = await this.page.$$('svg[aria-label="Like"]');
+                            let likedCount = 0;
+
+                            for (const btn of allLikeButtons) {
+                                if (likedCount >= 1) break; // Like max 1 comment per post
+
+                                // Check if this button is inside the main action bar (Section)
+                                const isMainLike = await btn.evaluate(el => !!el.closest('section'));
+                                if (isMainLike) continue; // Skip main post like
+
+                                // It's likely a comment!
+                                const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
+                                if (isConnected) {
+                                    this.logger.info(`Liking a comment on post ${postsProcessed + 1}...`);
+                                    await btn.click();
+                                    await delay(1000);
+                                    likedCount++;
+                                }
+                            }
+                        } catch (e) {
+                            this.logger.warn(`Error liking comment: ${e}`);
+                        }
                     }
                 } else {
                     if (behavior.enableLikes !== false) {
