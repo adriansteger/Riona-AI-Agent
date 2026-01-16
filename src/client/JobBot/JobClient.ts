@@ -61,7 +61,7 @@ export class JobClient {
     async init() {
         if (this.browser && this.browser.isConnected()) return;
 
-        // Fix for Raspberry Pi: Use system Chromium if bundled Chrome fails (ARM vs x86)
+        // Detect Linux/Raspberry Pi System Browser (Fix for ELF errors/ARM mismatch)
         let executablePath: string | undefined;
         if (process.platform === 'linux') {
             try {
@@ -74,6 +74,19 @@ export class JobClient {
                         break;
                     }
                 }
+
+                // Proactive Cleanup: Kill orphan Chromium processes to prevent "Too many windows"
+                // on execution start, especially if previous run crashed.
+                try {
+                    logger.info("Performing proactive process cleanup...");
+                    const { execSync } = require('child_process');
+                    // Kill chromium processes owned by this user
+                    execSync('pkill -u $(whoami) -f chromium', { stdio: 'ignore' });
+                    // Also kill chrome
+                    execSync('pkill -u $(whoami) -f chrome', { stdio: 'ignore' });
+                    logger.info("Cleanup complete.");
+                    // eslint-disable-next-line no-empty
+                } catch (e) { }
             } catch (e) {
                 logger.warn(`Failed to detect system browser: ${e}`);
             }
@@ -83,6 +96,8 @@ export class JobClient {
         this.browser = await puppeteer.launch({
             executablePath,
             headless: false,
+            timeout: 90000, // Increased to 90s for Raspberry Pi (Slow I/O)
+            dumpio: true,   // Log browser errors to stdout for debugging
             defaultViewport: null,
             args: [
                 '--no-sandbox',
