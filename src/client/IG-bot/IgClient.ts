@@ -77,7 +77,8 @@ export class IgClient {
             `--window-size=${width},${height}`,
             `--window-position=${left},${top}`,
             // User requested background/minimized launch
-            '--start-minimized',
+            // User requested maximized window for better loading reliability
+            '--start-maximized',
             // Stability flags (Optimized for Windows)
             '--disable-gpu',
             '--no-sandbox',
@@ -158,14 +159,17 @@ export class IgClient {
                 // Move newPage inside the try block to catch "Requesting main frame too early" errors
                 this.page = await this.browser.newPage();
 
-                // FORCE MINIMIZE: Use CDP to explicitly minimize the window to background
+                // FORCE MAXIMIZE: Start maximized to ensure elements render correctly
                 try {
                     const session = await this.page.createCDPSession();
                     const { windowId } = await session.send("Browser.getWindowForTarget") as any;
-                    await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
-                } catch (minErr) {
-                    this.logger.warn(`Failed to minimize window (non-critical): ${minErr}`);
+                    await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "maximized" } });
+                } catch (maxErr) {
+                    this.logger.warn(`Failed to maximize window (non-critical): ${maxErr}`);
                 }
+
+                // Fix for TimeoutError: Navigation timeout of 30000 ms exceeded (Slow RPi/Network)
+                this.page.setDefaultNavigationTimeout(60000);
 
                 break; // Success
             } catch (err) {
