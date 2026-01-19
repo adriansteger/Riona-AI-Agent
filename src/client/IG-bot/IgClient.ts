@@ -1420,10 +1420,24 @@ export class IgClient {
                         // Wait for like button to be visible in the modal
                         // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
                         // Structure: section (actions) -> span -> button -> svg[aria-label="Like"]
-                        const likeSelector = 'section svg[aria-label="Like"]';
-                        // Note: 'article[role="presentation"]' targets the modal content
+                        let likeSelector = 'section svg[aria-label="Like"]';
+                        let likeButton = await this.page.$(likeSelector);
 
-                        const likeButton = await this.page.$(likeSelector);
+                        // FALLBACK: If strict selector fails (e.g. Reels view), try finding ANY like button that isn't a comment
+                        if (!likeButton) {
+                            this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
+                            const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
+                            for (const btn of potentialButtons) {
+                                // Exclude if inside a list (ul) or small comment container
+                                const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]')); // Comments often in divs with role=button acting as hearts
+                                if (!isComment) {
+                                    likeButton = btn as ElementHandle; // Found a likely candidate
+                                    this.logger.info("Found fallback like button!");
+                                    break;
+                                }
+                            }
+                        }
+
                         if (likeButton) {
                             const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
                             if (isConnected) {
@@ -1434,7 +1448,7 @@ export class IgClient {
                             }
                         } else {
                             // Maybe already liked?
-                            const unlikeSelector = 'article[role="presentation"] svg[aria-label="Unlike"]';
+                            const unlikeSelector = 'svg[aria-label="Unlike"]'; // Broaden unlike check too
                             if (await this.page.$(unlikeSelector)) {
                                 this.logger.info(`Post ${postsProcessed + 1} already liked.`);
                             } else {

@@ -72,6 +72,8 @@ export class ActivityTracker {
 
     public trackAction(action: 'likes' | 'comments' | 'dms') {
         this.data = this.loadData();
+        this.cleanOldEntries(); // FIX: Cleanup old entries before saving to prevent file bloat
+
         if (!this.data[this.accountId]) {
             this.data[this.accountId] = { likes: [], comments: [], dms: [] };
         }
