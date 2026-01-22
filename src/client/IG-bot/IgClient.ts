@@ -82,7 +82,7 @@ export class IgClient {
             `--window-position=${left},${top}`,
             // User requested background/minimized launch
             // User requested maximized window for better loading reliability
-            '--start-maximized',
+            // '--start-maximized', // DISABLED: User wants foreground but not full screen
             // Stability flags (Optimized for Windows)
             '--disable-gpu',
             '--no-sandbox',
@@ -164,6 +164,8 @@ export class IgClient {
                 this.page = await this.browser.newPage();
 
                 // FORCE MAXIMIZE: Start maximized to ensure elements render correctly
+                // DISABLED: User wants foreground but not full screen
+                /*
                 try {
                     const session = await this.page.createCDPSession();
                     const { windowId } = await session.send("Browser.getWindowForTarget") as any;
@@ -171,6 +173,7 @@ export class IgClient {
                 } catch (maxErr) {
                     this.logger.warn(`Failed to maximize window (non-critical): ${maxErr}`);
                 }
+                */
 
                 // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
                 await this.page.evaluateOnNewDocument(() => {

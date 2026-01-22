@@ -107,7 +107,9 @@ export class JobClient {
                 '--no-first-run',
                 '--no-zygote',
                 '--disable-gpu',
-                '--start-maximized',
+                // '--start-maximized', // DISABLED: User wants foreground but not full screen
+                `--window-size=1280,800`,
+                `--window-position=${Math.floor(Math.random() * 500)},${Math.floor(Math.random() * 300)}`, // Random position to prevent stacking
                 '--disable-blink-features=AutomationControlled',
                 // Keep browser alive and active even when minimized/backgrounded
                 '--disable-background-timer-throttling',
