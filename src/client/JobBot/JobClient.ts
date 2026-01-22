@@ -131,7 +131,11 @@ export class JobClient {
 
         this.page = await this.browser.newPage();
 
-
+        // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
+        await this.page.evaluateOnNewDocument(() => {
+            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+        });
 
         await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await this.page.setViewport({ width: 1920, height: 1080 });
@@ -145,7 +149,11 @@ export class JobClient {
             if (!this.page || this.page.isClosed()) {
                 this.page = await this.browser.newPage();
 
-
+                // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
+                await this.page.evaluateOnNewDocument(() => {
+                    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+                    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+                });
 
                 await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
             }

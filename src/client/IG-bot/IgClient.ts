@@ -168,6 +168,12 @@ export class IgClient {
                     this.logger.warn(`Failed to maximize window (non-critical): ${maxErr}`);
                 }
 
+                // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
+                await this.page.evaluateOnNewDocument(() => {
+                    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+                    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+                });
+
                 // Fix for TimeoutError: Navigation timeout of 30000 ms exceeded (Slow RPi/Network)
                 this.page.setDefaultNavigationTimeout(60000);
 
