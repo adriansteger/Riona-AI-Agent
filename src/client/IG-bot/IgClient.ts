@@ -163,17 +163,27 @@ export class IgClient {
                 // Move newPage inside the try block to catch "Requesting main frame too early" errors
                 this.page = await this.browser.newPage();
 
-                // FORCE MAXIMIZE: Start maximized to ensure elements render correctly
-                // DISABLED: User wants foreground but not full screen
-                /*
+                // FORCE RANDOM POSITION: Use CDP to move window, bypassing Window Manager defaults
                 try {
                     const session = await this.page.createCDPSession();
                     const { windowId } = await session.send("Browser.getWindowForTarget") as any;
-                    await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "maximized" } });
-                } catch (maxErr) {
-                    this.logger.warn(`Failed to maximize window (non-critical): ${maxErr}`);
+                    const randomX = Math.floor(Math.random() * 400); // 0-400px offset
+                    const randomY = Math.floor(Math.random() * 300); // 0-300px offset
+
+                    await session.send("Browser.setWindowBounds", {
+                        windowId,
+                        bounds: {
+                            left: randomX,
+                            top: randomY,
+                            width: 1280,
+                            height: 800,
+                            windowState: "normal"
+                        }
+                    });
+                    this.logger.info(`Moved window to position: ${randomX},${randomY}`);
+                } catch (moveErr) {
+                    this.logger.warn(`Failed to move window (non-critical): ${moveErr}`);
                 }
-                */
 
                 // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
                 await this.page.evaluateOnNewDocument(() => {

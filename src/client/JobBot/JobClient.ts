@@ -133,7 +133,28 @@ export class JobClient {
 
         this.page = await this.browser.newPage();
 
-        // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
+        // FORCE RANDOM POSITION via CDP: Bypasses OS window manager defaults to prevent stacking
+        try {
+            const session = await this.page.createCDPSession();
+            const { windowId } = await session.send("Browser.getWindowForTarget") as any;
+            const randomX = Math.floor(Math.random() * 400);
+            const randomY = Math.floor(Math.random() * 300);
+
+            await session.send("Browser.setWindowBounds", {
+                windowId,
+                bounds: {
+                    left: randomX,
+                    top: randomY,
+                    width: 1280,
+                    height: 800,
+                    windowState: "normal"
+                }
+            });
+            logger.info(`JobBot window moved to: ${randomX},${randomY}`);
+        } catch (e) {
+            logger.warn(`Failed to move JobBot window: ${e}`);
+        }
+
         await this.page.evaluateOnNewDocument(() => {
             Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
             Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
