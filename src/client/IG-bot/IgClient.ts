@@ -70,8 +70,12 @@ export class IgClient {
         const height = 800;
         const screenWidth = 1920;
         const screenHeight = 1080;
-        const left = Math.floor((screenWidth - width) / 2);
-        const top = Math.floor((screenHeight - height) / 2);
+        // Randomize position to prevent "stacking" occlusion throttling
+        // Windows on top of each other often get backgrounded by Chrome resource saver.
+        const randomX = Math.floor(Math.random() * 500);
+        const randomY = Math.floor(Math.random() * 300);
+        const left = Math.max(0, Math.floor((screenWidth - width) / 2) - 250 + randomX);
+        const top = Math.max(0, Math.floor((screenHeight - height) / 2) - 150 + randomY);
 
         const launchArgs = [
             `--window-size=${width},${height}`,
