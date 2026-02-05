@@ -430,28 +430,39 @@ export class IgClient {
         try {
             // Check if we are stuck on the "Continue as..." / "Use another profile" screen
             const interstitialAction = await this.page!.evaluateHandle((targetUsername) => {
-                const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                // Helper to normalize text
+                const normalize = (s: string | null) => (s || '').toLowerCase().trim();
 
-                // 1. Look for "Use another profile" or "Switch Accounts" (Highest Priority if mismatch or unsure)
-                const switchBtn = buttons.find(b =>
-                    b.textContent?.toLowerCase().includes('switch accounts') ||
-                    b.textContent?.toLowerCase().includes('log into another account') ||
-                    b.textContent?.toLowerCase().includes('use another profile')
-                );
+                // distinct buttons usually found on this page
+                // We broaden search to ANY element that might contain the text, then find the clickable part
+                const allElements = Array.from(document.querySelectorAll('button, a, div, span, h2, h3, p'));
 
-                // 2. Look for "Continue as [User]" IF it matches our target username
-                const continueBtn = buttons.find(b => b.textContent?.toLowerCase() === 'continue' || b.textContent?.toLowerCase().includes('continue as'));
+                // 1. Find "Use another profile" or "Switch Accounts" explicitly by text
+                const switchElem = allElements.find(el => {
+                    const t = normalize((el as HTMLElement).innerText || el.textContent);
+                    return t === 'use another profile' || t === 'switch accounts' || t === 'log into another account';
+                });
 
-                if (continueBtn) {
-                    const bodyText = document.body.innerText || "";
+                // 2. Find "Continue" button
+                const continueElem = allElements.find(el => {
+                    const t = normalize((el as HTMLElement).innerText || el.textContent);
+                    return t === 'continue' || t.includes('continue as');
+                });
+
+                // Logic:
+                if (continueElem) {
+                    const bodyText = (document.body as HTMLElement).innerText || document.body.textContent || "";
                     // If we see our username, we can click continue.
-                    if (bodyText.includes(targetUsername)) return continueBtn;
-
-                    // If we see a DIFFERENT username (and no switch button found yet??), we MUST find a way to switch.
-                    // But usually "Use another profile" exists if "Continue" exists.
+                    if (bodyText.includes(targetUsername)) {
+                        return continueElem.closest('button, a, div[role="button"]') || continueElem;
+                    }
                 }
 
-                return switchBtn || null; // Prefer switch button if continue not matched
+                if (switchElem) {
+                    return switchElem.closest('button, a, div[role="button"]') || switchElem;
+                }
+
+                return null;
             }, this.username);
 
             const btnElement = interstitialAction.asElement();
