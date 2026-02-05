@@ -452,6 +452,18 @@ export class IgClient {
                 // Helper to normalize text
                 const normalize = (s: string | null) => (s || '').toLowerCase().trim();
 
+                const bodyText = (document.body as HTMLElement).innerText || document.body.textContent || "";
+
+                // PRIORITY 0: Saved Account Password Prompt (Match)
+                // If we see our username AND a password field, we should just login, NOT switch.
+                const passwordInput = document.querySelector('input[name="password"]');
+                const usernameInput = document.querySelector('input[name="username"]');
+
+                if (passwordInput && !usernameInput && bodyText.includes(targetUsername)) {
+                    // We are on the correct "Saved Account" screen. Return null so we fall through to the password-filling logic below.
+                    return null;
+                }
+
                 // distinct buttons usually found on this page
                 // We broaden search to ANY element that might contain the text, then find the clickable part
                 const allElements = Array.from(document.querySelectorAll('button, a, div, span, h2, h3, p'));
