@@ -412,6 +412,46 @@ export class IgClient {
         await this.handleAutomatedBehaviorWarning();
 
         // ROBUST INPUT FINDING STRATEGY
+
+        // Strategy 0: Check for "Switch Accounts" / "Saved Account" Modal
+        // Sometimes Instagram shows a "Welcome Back" modal with just a password field.
+        // We prefer to "Switch Accounts" to get a clean login form, or fill the password if locked in.
+        try {
+            const switchAccBtn = await this.page!.evaluateHandle(() => {
+                const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                return buttons.find(b =>
+                    b.textContent?.toLowerCase().includes('switch accounts') ||
+                    b.textContent?.toLowerCase().includes('log into another account')
+                ) || null;
+            });
+
+            const btnElement = switchAccBtn.asElement();
+            if (btnElement) {
+                logger.info("Found 'Switch Accounts' button. Clicking to reset login form...");
+                await (btnElement as any).click();
+                await delay(2000); // Wait for form reload
+            } else {
+                // If NO Switch Account button, but we see a Password field and NO Username field?
+                const hasPassword = await this.page!.$('input[name="password"]') !== null;
+                const hasUsername = await this.page!.$('input[name="username"]') !== null;
+
+                if (hasPassword && !hasUsername) {
+                    logger.info("Detected 'Saved Account' login (Password-only). Attempting to fill password...");
+                    await this.page!.type('input[name="password"]', this.password);
+                    await delay(500);
+                    // Try to submit immediately
+                    await this.page!.keyboard.press('Enter');
+                    await delay(3000);
+
+                    // If we successfully logged in, the next checks (Verification) will pass.
+                    // If not, we might fall through or error out.
+                    // We check if we are redirected.
+                }
+            }
+        } catch (e) {
+            // Ignore errors here, proceed to standard strategy
+        }
+
         try {
             // Strategy 1: Standard Name
             await this.page.waitForSelector('input[name="username"]', { timeout: 10000 });
@@ -460,7 +500,7 @@ export class IgClient {
                 await delay(1000);
                 await this.page.keyboard.type(this.password, { delay: 50 });
             } catch (e: any) {
-                // If typing fails (TargetClosed), it often means page reloaded. 
+                // If typing fails (TargetClosed), it often means page reloaded.
                 // We should stop here, but let's log specifically.
                 throw new Error(`Typing crashed (TargetCloseError?): ${e.message}`);
             }
@@ -489,14 +529,12 @@ export class IgClient {
 
         // --- Verification & Popup Handling ---
 
-        // --- Verification & Popup Handling ---
-
         await this.handleNotificationPopup();
         await this.handleAutomatedBehaviorWarning();
 
         // Handle "Save Info" page
         // Sometimes it's a "Not Now" button on the main page, not a dialog
-        const notNowButton = await this.page.evaluateHandle(() => {
+        const notNowButton = await this.page!.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
             return buttons.find(b => b.textContent === 'Not Now') || null;
         });
@@ -508,20 +546,37 @@ export class IgClient {
         }
 
         // --- STRICT SUCCESS CHECK ---
-        const currentUrl = this.page.url();
-        const isLogin = currentUrl.includes("/accounts/login");
-        const isOneTap = currentUrl.includes("/accounts/onetap"); // "Save login info" page
-        const isFeed = !isLogin && !isOneTap;
+        const currentUrl = this.page!.url();
 
-        if (isLogin) {
-            // Still on login page? Maybe failed. Check for error message?
-            const errorMsg = await this.page.$eval('p#slfErrorAlert', el => el.textContent).catch(() => null);
+        // We re-use the robust "Positive" check from loginWithCookies
+        // We must ensure we are NOT on a public profile page (which has no nav bar).
+        const isLoggedIn = await this.page!.evaluate(() => {
+            const homeIcon = document.querySelector('svg[aria-label="Home"]');
+            // const searchIcon = document.querySelector('svg[aria-label="Search"]); // Search can be on public pages?
+            const navBar = document.querySelector('div[role="navigation"]');
+            const profileLink = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]');
+
+            // "Negative" Check: Do we see "Log In" buttons?
+            const loginBtn = Array.from(document.querySelectorAll('a, button')).some(el =>
+                el.textContent?.toLowerCase().includes('log in') ||
+                el.getAttribute('href')?.includes('/accounts/login')
+            );
+
+            return !!(homeIcon || navBar || profileLink) && !loginBtn;
+        });
+
+        if (!isLoggedIn) {
+            // Check for specific error messages on page
+            const errorMsg = await this.page!.$eval('p#slfErrorAlert', el => el.textContent).catch(() => null);
             if (errorMsg) {
                 throw new Error(`Login Failed: ${errorMsg}`);
             }
-            logger.warn("Still on login URL after attempt. Cookies valid?");
+            // Add Screenshot for debugging failed login
+            try { await this.page!.screenshot({ path: 'logs/login_failed_debug.png' }); } catch (e) { }
+
+            throw new Error(`Login Verification Failed: Session indicators missing on ${currentUrl}. (Bot likely on public page or login failed).`);
         } else {
-            logger.info(`Login appears successful. URL: ${currentUrl}`);
+            logger.info(`Login successful & Verified (Indicators found). URL: ${currentUrl}`);
         }
 
     }
