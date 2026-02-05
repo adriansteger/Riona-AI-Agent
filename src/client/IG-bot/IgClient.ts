@@ -265,7 +265,26 @@ export class IgClient {
         await this.page.setViewport({ width, height });
 
         // --- WINDOW TITLE FOR USER IDENTIFICATION ---
-        await this.page.evaluate((u) => { document.title = `${u} - Instagram`; }, this.username);
+        // --- WINDOW TITLE FOR USER IDENTIFICATION ---
+        // We use a persistent observer because Instagram (SPA) changes the title frequently.
+        await this.page.evaluate((u) => {
+            const desiredTitle = `${u} - Instagram`;
+            const enforceTitle = () => {
+                if (document.title !== desiredTitle) {
+                    document.title = desiredTitle;
+                }
+            };
+
+            // 1. Set immediately
+            enforceTitle();
+
+            // 2. Watch for changes
+            const observer = new MutationObserver(enforceTitle);
+            observer.observe(document.querySelector('title')!, { childList: true, subtree: true });
+
+            // 3. Interval backup (in case the mutation observer misses a full swap)
+            setInterval(enforceTitle, 1000);
+        }, this.username);
 
         // --- POST-LAUNCH CAPTCHA CHECK ---
         await this.handleRecaptcha();
