@@ -1058,11 +1058,15 @@ export class IgClient {
 
     async checkAndAcceptDMRequests() {
         if (!this.page) return;
+
+        // Listener handler
+        const consoleHandler = (msg: any) => {
+            if (msg.text().includes('[REQ DEBUG]')) console.log(`BROWSER REQ: ${msg.text()}`);
+        };
+
         try {
             // Enable Console Logging for this method
-            this.page.on('console', msg => {
-                if (msg.text().includes('[REQ DEBUG]')) console.log(`BROWSER REQ: ${msg.text()}`);
-            });
+            this.page.on('console', consoleHandler);
 
             this.logger.info("Checking for DM Requests...");
             await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
@@ -1212,6 +1216,8 @@ export class IgClient {
             }
         } catch (e) {
             this.logger.error(`Error accepting DM requests: ${e}`);
+        } finally {
+            this.page.off('console', consoleHandler);
         }
     }
 
@@ -1231,14 +1237,17 @@ export class IgClient {
             return;
         }
 
+        // Listener handler
+        const consoleHandler = (msg: any) => {
+            if (msg.text().includes('[DM DEBUG]')) {
+                console.log(`BROWSER CONS: ${msg.text()}`);
+            }
+        };
+
         try {
             this.logger.info("Checking for unread Direct Messages...");
             // Listen for browser console logs (DEBUG)
-            this.page.on('console', msg => {
-                if (msg.text().includes('[DM DEBUG]')) {
-                    console.log(`BROWSER CONS: ${msg.text()}`);
-                }
-            });
+            this.page.on('console', consoleHandler);
 
             await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
             await delay(3000);
@@ -1548,6 +1557,8 @@ export class IgClient {
 
         } catch (e) {
             this.logger.error(`Error checking/responding to DMs: ${e}`);
+        } finally {
+            this.page.off('console', consoleHandler);
         }
     }
 
