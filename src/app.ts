@@ -79,7 +79,7 @@ app.get('*', (_req, res) => {
 // Registry for active persistent sessions
 const activeSessions = new Map<string, IgClient>();
 
-const processAccount = async (account: any) => {
+const processAccount = async (account: any, emailService?: EmailService) => {
   // Stagger start slightly (0-5s) to avoid CPU spikes if multiple launch at once
   const stagger = Math.floor(Math.random() * 5000);
   await new Promise(r => setTimeout(r, stagger));
@@ -163,7 +163,7 @@ const processAccount = async (account: any) => {
         proxy: account.proxy,
         languages: account.settings?.languages,
         defaultLanguage: account.settings?.defaultLanguage
-      }, accountLogger, character);
+      }, accountLogger, character, emailService);
 
       activeSessions.set(account.id, igClient);
     } else {
@@ -250,6 +250,35 @@ const runInstagram = async () => {
 
   logger.info(`Found ${enabledAccounts.length} enabled Instagram accounts: ${enabledAccounts.map(a => a.id).join(', ')}`);
 
+  // Initialize Global Email Service for Alerts
+  let alertEmailService: EmailService | undefined;
+
+  // Check for specific IG_ALERT credentials first, then fallback to generic EMAIL credentials
+  const mailUser = process.env.IG_ALERT_EMAIL_USER || process.env.EMAIL_USER;
+  const mailPass = process.env.IG_ALERT_EMAIL_PASS || process.env.EMAIL_PASS;
+  const mailHost = process.env.IG_ALERT_EMAIL_HOST || process.env.EMAIL_HOST;
+  const mailPort = process.env.IG_ALERT_EMAIL_PORT || process.env.EMAIL_PORT || '465';
+  const mailSecure = process.env.IG_ALERT_EMAIL_SECURE || process.env.EMAIL_SECURE || 'true';
+  const mailFrom = process.env.IG_ALERT_EMAIL_FROM || process.env.EMAIL_FROM;
+  const mailService = process.env.IG_ALERT_EMAIL_SERVICE || process.env.EMAIL_SERVICE;
+  const mailTo = process.env.IG_ALERT_EMAIL_TO || process.env.EMAIL_ALERTS_TO || mailUser;
+
+  if (mailUser && mailPass) {
+    alertEmailService = new EmailService({
+      host: mailHost,
+      port: parseInt(mailPort),
+      secure: mailSecure === 'true',
+      user: mailUser,
+      pass: mailPass,
+      to: mailTo!,
+      from: mailFrom,
+      service: mailService
+    });
+    logger.info(`Global Email Alert System initialized (Sender: ${mailFrom || mailUser}, Config: ${mailHost || mailService})`);
+  } else {
+    logger.warn("Email alert system skipped (Missing Credentials). CAPTCHA alerts will not be sent.");
+  }
+
   // Configurable Concurrency
   // Default to 5 if not set
   const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
@@ -258,7 +287,7 @@ const runInstagram = async () => {
   const limit = pLimit(maxConcurrent);
 
   // Create promises for all enabled accounts
-  const promises = enabledAccounts.map(account => limit(() => processAccount(account)));
+  const promises = enabledAccounts.map(account => limit(() => processAccount(account, alertEmailService)));
 
   // Wait for all to finish
   await Promise.all(promises);
@@ -309,6 +338,8 @@ const runJobBot = async () => {
     user: process.env.EMAIL_USER || '',
     pass: process.env.EMAIL_PASS || '',
     to: '', // Will be set dynamically by JobClient -> checkUserPreferences
+    from: process.env.EMAIL_FROM,
+    service: process.env.EMAIL_SERVICE
   };
 
   if (!emailConfig.user || !emailConfig.pass) {

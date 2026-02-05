@@ -16,6 +16,8 @@ import fs from "fs/promises";
 import { getShouldExitInteractions } from '../../api/agent';
 import { Contact } from '../../models/Contact';
 
+import { EmailService } from "../../services/EmailService";
+
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
 puppeteerExtra.use(
@@ -36,6 +38,7 @@ export class IgClient {
     private proxy?: string;
     private logger: any; // Using any or specific Logger type if available
     private character: any;
+    private emailService?: EmailService;
 
     private languages: string[] = ['English'];
     private defaultLanguage: string = 'English';
@@ -43,7 +46,8 @@ export class IgClient {
     constructor(
         config: { username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string },
         loggerInstance?: any,
-        character?: any
+        character?: any,
+        emailService?: EmailService
     ) {
         this.username = config.username || '';
         this.password = config.password || '';
@@ -51,6 +55,7 @@ export class IgClient {
         this.proxy = config.proxy;
         this.logger = loggerInstance || logger;
         this.character = character || {};
+        this.emailService = emailService;
         this.languages = config.languages || ['English'];
         this.defaultLanguage = config.defaultLanguage || 'English';
     }
@@ -241,7 +246,6 @@ export class IgClient {
 
         if (!this.browser || !this.page) throw new Error("Browser/Page failed to initialize after multiple attempts.");
 
-        // Authenticate proxy if credentials are in the URL
         if (this.proxy) {
             try {
                 const proxyUrl = new URL(this.proxy);
@@ -259,6 +263,12 @@ export class IgClient {
         const userAgent = new UserAgent({ deviceCategory: "desktop" });
         await this.page.setUserAgent(userAgent.toString());
         await this.page.setViewport({ width, height });
+
+        // --- WINDOW TITLE FOR USER IDENTIFICATION ---
+        await this.page.evaluate((u) => { document.title = `${u} - Instagram`; }, this.username);
+
+        // --- POST-LAUNCH CAPTCHA CHECK ---
+        await this.handleRecaptcha();
 
         if (await Instagram_cookiesExist() && !this.userDataDir) {
             // If manual cookies and no strict profile isolation
@@ -603,9 +613,76 @@ export class IgClient {
         }
     }
 
+    async handleRecaptcha() {
+        if (!this.page) return;
+
+        try {
+            const currentUrl = this.page.url();
+            const isChallengeUrl = currentUrl.includes('/challenge/');
+
+            // Check for reCAPTCHA iframes or classic captcha elements
+            const hasCaptcha = await this.page.evaluate(() => {
+                const iframes = Array.from(document.querySelectorAll('iframe'));
+                const recaptchaIframe = iframes.find(f => f.src.includes('recaptcha') || f.src.includes('google.com/recaptcha'));
+                const captchaBox = document.querySelector('.g-recaptcha') || document.querySelector('#recaptcha_widget');
+                return !!recaptchaIframe || !!captchaBox;
+            });
+
+            if (isChallengeUrl || hasCaptcha) {
+                this.logger.error(`🚨 CRITICAL: reCAPTCHA DETECTED for user ${this.username} 🚨`);
+                this.logger.error(`URL: ${currentUrl}`);
+
+                // Send Email Alert
+                if (this.emailService) {
+                    await this.emailService.sendCaptchaAlert(this.username, currentUrl);
+                } else {
+                    this.logger.warn("No EmailService linked. Skipping email alert.");
+                }
+
+                this.logger.warn("⏸️ PAUSING BOT Execution for manual solving...");
+                this.logger.warn(`ACTION REQUIRED: Switch to window '${this.username} - Instagram' and solve the CAPTCHA.`);
+
+                // Wait loop
+                const maxWaitTime = 10 * 60 * 1000; // 10 minutes max wait
+                const checkInterval = 5000;
+                let waited = 0;
+
+                while (waited < maxWaitTime) {
+                    if (this.page.isClosed()) break;
+
+                    const stillHasCaptcha = await this.page.evaluate(() => {
+                        const iframes = Array.from(document.querySelectorAll('iframe'));
+                        const recaptchaIframe = iframes.find(f => f.src.includes('recaptcha') || f.src.includes('google.com/recaptcha'));
+                        const challengeUrl = window.location.href.includes('/challenge/');
+                        return !!recaptchaIframe || challengeUrl;
+                    });
+
+                    if (!stillHasCaptcha) {
+                        this.logger.info("✅ CAPTCHA Solved/Gone! Resuming execution...");
+                        await delay(3000); // Settle time
+                        return;
+                    }
+
+                    await delay(checkInterval);
+                    waited += checkInterval;
+                    if (waited % 30000 === 0) {
+                        this.logger.info(`Still waiting for CAPTCHA solution... (${waited / 1000}s)`);
+                    }
+                }
+
+                throw new Error("Timed out waiting for CAPTCHA solution (10 mins). Aborting session.");
+            }
+        } catch (e) {
+            this.logger.error(`Error in handleRecaptcha: ${e}`);
+        }
+    }
+
     private async handleAutomatedBehaviorWarning() {
         if (!this.page) return;
         try {
+            // Check for CAPTCHA first, as it often accompanies these warnings
+            await this.handleRecaptcha();
+
             const currentUrl = this.page.url();
             const isChallengePage = currentUrl.includes('/challenge/');
 

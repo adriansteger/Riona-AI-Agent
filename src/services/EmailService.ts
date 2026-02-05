@@ -9,6 +9,7 @@ interface EmailConfig {
     user: string;
     pass: string;
     to: string;
+    from?: string; // Explicit sender address
 }
 
 export class EmailService {
@@ -25,12 +26,13 @@ export class EmailService {
             }
         };
 
-        if (config.service) {
-            transportOptions.service = config.service;
-        } else {
+        // Prioritize HOST (SMTP) over Service (e.g. Gmail) to ensure "right mail server" usage
+        if (config.host) {
             transportOptions.host = config.host;
             transportOptions.port = config.port;
             transportOptions.secure = config.secure;
+        } else if (config.service) {
+            transportOptions.service = config.service;
         }
 
         this.transporter = nodemailer.createTransport(transportOptions);
@@ -48,7 +50,7 @@ export class EmailService {
         `;
 
         const mailOptions = {
-            from: this.config.user,
+            from: this.config.from || this.config.user, // Use configured FROM or fallback to USER
             to: toEmail,
             subject: subject,
             html: html
@@ -65,5 +67,42 @@ export class EmailService {
     setRecipient(email: string) {
         this.config.to = email;
         logger.info(`Email recipient updated to: ${email}`);
+    }
+
+    async sendCaptchaAlert(username: string, url: string, toEmail: string = this.config.to) {
+        if (!toEmail) {
+            logger.warn("Cannot send CAPTCHA alert: No recipient email configured.");
+            return;
+        }
+
+        const subject = `⚠️ ACTION REQUIRED: reCAPTCHA on ${username}`;
+        const html = `
+            <h2>reCAPTCHA Detected for ${username}</h2>
+            <p>The bot has paused execution for account <strong>${username}</strong> because a reCAPTCHA challenge was detected.</p>
+            <p><strong>URL:</strong> <a href="${url}">${url}</a></p>
+            <br />
+            <h3>Action Required:</h3>
+            <ol>
+                <li>Open the browser window for <strong>${username}</strong> (Window Title: "${username} - Instagram").</li>
+                <li>Manually solve the CAPTCHA.</li>
+                <li>Once the CAPTCHA is solved and the page redirects to the feed/home, the bot will automatically resume.</li>
+            </ol>
+            <br />
+            <p><em>Sent by Riona AI Agent</em></p>
+        `;
+
+        const mailOptions = {
+            from: this.config.user,
+            to: toEmail,
+            subject: subject,
+            html: html
+        };
+
+        try {
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`CAPTCHA alert email sent to ${toEmail} for account ${username}`);
+        } catch (error) {
+            logger.error(`Failed to send CAPTCHA alert email: ${error}`);
+        }
     }
 }
