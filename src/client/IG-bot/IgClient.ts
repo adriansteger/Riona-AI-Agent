@@ -677,9 +677,53 @@ export class IgClient {
         }
     }
 
+    async handleRateLimit() {
+        if (!this.page) return;
+        try {
+            // Check for 429 Error indicators
+            const isRateLimited = await this.page.evaluate(() => {
+                const bodyText = document.body.innerText || document.body.textContent || "";
+                return bodyText.includes("HTTP ERROR 429") ||
+                    (bodyText.includes("This page isn’t working") && bodyText.includes("429"));
+            });
+
+            if (isRateLimited) {
+                const currentUrl = this.page.url();
+                this.logger.error(`⛔ CRITICAL: HTTP 429 RATE LIMIT DETECTED for user ${this.username}.`);
+                this.logger.error(`URL: ${currentUrl}`);
+
+                // Send Email Alert
+                if (this.emailService) {
+                    await this.emailService.sendRateLimitAlert(this.username, currentUrl);
+                } else {
+                    this.logger.warn("No EmailService linked. Skipping Rate Limit alert.");
+                }
+
+                // 60 Minute Cool-down
+                const cooldownMinutes = 60;
+                this.logger.warn(`⏳ PAUSING BOT for ${cooldownMinutes} minutes to allow rate limit to expire...`);
+
+                const cooldownMs = cooldownMinutes * 60 * 1000;
+                await delay(cooldownMs);
+
+                this.logger.info("✅ Cool-down complete. Attempting to resume/refresh...");
+                try {
+                    await this.page.reload({ waitUntil: 'networkidle2' });
+                } catch (e) {
+                    this.logger.warn("Reload after cool-down failed, likely still limited or session closed.");
+                }
+            }
+        } catch (e) {
+            this.logger.error(`Error in handleRateLimit: ${e}`);
+        }
+    }
+
     private async handleAutomatedBehaviorWarning() {
         if (!this.page) return;
         try {
+            // Check for Rate Limits (429)
+            await this.handleRateLimit();
+
             // Check for CAPTCHA first, as it often accompanies these warnings
             await this.handleRecaptcha();
 

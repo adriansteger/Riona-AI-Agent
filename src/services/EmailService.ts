@@ -105,4 +105,38 @@ export class EmailService {
             logger.error(`Failed to send CAPTCHA alert email: ${error}`);
         }
     }
+
+    async sendRateLimitAlert(username: string, url: string, toEmail: string = this.config.to) {
+        if (!toEmail) {
+            logger.warn("Cannot send Rate Limit alert: No recipient email configured.");
+            return;
+        }
+
+        const subject = `⛔ RATE LIMITED (429): ${username} Paused`;
+        const html = `
+            <h2>HTTP 429 Rate Limit Detected for ${username}</h2>
+            <p><strong>Status:</strong> CRITICAL PAUSE</p>
+            <p>The bot encountered a "Too Many Requests" (429) error from Instagram.</p>
+            <p><strong>Action Taken:</strong> The bot has entered a mandatory <strong>60-minute cool-down</strong> period to protect the account.</p>
+            <p><strong>URL:</strong> ${url}</p>
+            <br />
+            <p><em>No action is required from you. The bot will automatically attempt to resume after 1 hour.</em></p>
+            <br />
+            <p><em>Sent by Riona AI Agent</em></p>
+        `;
+
+        const mailOptions = {
+            from: this.config.from || this.config.user,
+            to: toEmail,
+            subject: subject,
+            html: html
+        };
+
+        try {
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`Rate Limit alert email sent to ${toEmail} for account ${username}`);
+        } catch (error) {
+            logger.error(`Failed to send Rate Limit alert email: ${error}`);
+        }
+    }
 }
