@@ -503,12 +503,12 @@ export class IgClient {
                 await delay(3000); // Wait for transition
             } else {
                 // Fallback: existing password-only check
-                const hasPassword = await this.page!.$('input[name="password"]') !== null;
+                const hasPassword = await this.page!.$('input[name="password"], input[type="password"]') !== null;
                 const hasUsername = await this.page!.$('input[name="username"]') !== null;
 
                 if (hasPassword && !hasUsername) {
                     logger.info("Detected 'Saved Account' login (Password-only). Attempting to fill password...");
-                    await this.page!.type('input[name="password"]', this.password);
+                    await this.page!.type('input[name="password"], input[type="password"]', this.password);
                     await delay(500);
                     // Try to submit immediately
                     await this.page!.keyboard.press('Enter');
