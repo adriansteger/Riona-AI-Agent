@@ -423,25 +423,44 @@ export class IgClient {
 
         // ROBUST INPUT FINDING STRATEGY
 
-        // Strategy 0: Check for "Switch Accounts" / "Saved Account" Modal
+        // Strategy 0: Check for "Switch Accounts" / "Saved Account" Modal / "Continue as..." Interstitial
         // Sometimes Instagram shows a "Welcome Back" modal with just a password field.
-        // We prefer to "Switch Accounts" to get a clean login form, or fill the password if locked in.
-        try {
-            const switchAccBtn = await this.page!.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-                return buttons.find(b =>
-                    b.textContent?.toLowerCase().includes('switch accounts') ||
-                    b.textContent?.toLowerCase().includes('log into another account')
-                ) || null;
-            });
+        // OR a full page interstitial "Continue as [User]" vs "Use another profile".
 
-            const btnElement = switchAccBtn.asElement();
+        try {
+            // Check if we are stuck on the "Continue as..." / "Use another profile" screen
+            const interstitialAction = await this.page!.evaluateHandle((targetUsername) => {
+                const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+
+                // 1. Look for "Use another profile" or "Switch Accounts" (Highest Priority if mismatch or unsure)
+                const switchBtn = buttons.find(b =>
+                    b.textContent?.toLowerCase().includes('switch accounts') ||
+                    b.textContent?.toLowerCase().includes('log into another account') ||
+                    b.textContent?.toLowerCase().includes('use another profile')
+                );
+
+                // 2. Look for "Continue as [User]" IF it matches our target username
+                const continueBtn = buttons.find(b => b.textContent?.toLowerCase() === 'continue' || b.textContent?.toLowerCase().includes('continue as'));
+
+                if (continueBtn) {
+                    const bodyText = document.body.innerText || "";
+                    // If we see our username, we can click continue.
+                    if (bodyText.includes(targetUsername)) return continueBtn;
+
+                    // If we see a DIFFERENT username (and no switch button found yet??), we MUST find a way to switch.
+                    // But usually "Use another profile" exists if "Continue" exists.
+                }
+
+                return switchBtn || null; // Prefer switch button if continue not matched
+            }, this.username);
+
+            const btnElement = interstitialAction.asElement();
             if (btnElement) {
-                logger.info("Found 'Switch Accounts' button. Clicking to reset login form...");
+                logger.info("Found Interstitial Login Button (Switch/Continue). Clicking...");
                 await (btnElement as any).click();
-                await delay(2000); // Wait for form reload
+                await delay(3000); // Wait for transition
             } else {
-                // If NO Switch Account button, but we see a Password field and NO Username field?
+                // Fallback: existing password-only check
                 const hasPassword = await this.page!.$('input[name="password"]') !== null;
                 const hasUsername = await this.page!.$('input[name="username"]') !== null;
 
@@ -452,15 +471,12 @@ export class IgClient {
                     // Try to submit immediately
                     await this.page!.keyboard.press('Enter');
                     await delay(3000);
-
-                    // If we successfully logged in, the next checks (Verification) will pass.
-                    // If not, we might fall through or error out.
-                    // We check if we are redirected.
                 }
             }
         } catch (e) {
             // Ignore errors here, proceed to standard strategy
         }
+
 
         try {
             // Strategy 1: Standard Name
