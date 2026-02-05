@@ -637,6 +637,28 @@ export class IgClient {
 
     }
 
+    async checkAuthWall() {
+        if (!this.page) return;
+        try {
+            // Check for the "Log in to continue" / "Sign up" modal
+            const authWall = await this.page.evaluate(() => {
+                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                return dialogs.some(d => {
+                    const text = (d as HTMLElement).innerText || "";
+                    return (text.includes("Log in") && text.includes("Sign up")) || text.includes("Like this post");
+                });
+            });
+
+            if (authWall) {
+                this.logger.error("⛔ CRITICAL: Auth Wall / Session Expired detected during interaction.");
+                throw new Error("Session Expired: Auth Wall Detected");
+            }
+        } catch (e: any) {
+            if (e.message === "Session Expired: Auth Wall Detected") throw e;
+            // Ignore other errors during check
+        }
+    }
+
     private async handleCookieConsent() {
         if (!this.page) return;
         this.logger.info("Checking for Cookie Consent...");
@@ -1954,6 +1976,10 @@ export class IgClient {
                                 await this.humanLikeClick(likeButton as puppeteer.ElementHandle<Element>)
                                     .catch(err => console.warn(`Failed to click like button: ${err}`));
                                 await delay(500 + Math.random() * 500); // Small random delay
+
+                                // CHECK FOR AUTH WALL / SESSION EXPIRY IMMEDIATELLY
+                                await this.checkAuthWall();
+
                                 console.log(`Post ${postIndex} liked.`);
                                 activityTracker.trackAction('likes');
                             } else {
