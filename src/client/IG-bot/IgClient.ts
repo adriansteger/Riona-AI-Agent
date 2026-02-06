@@ -494,7 +494,8 @@ export class IgClient {
                 if (continueElem) {
                     const bodyText = (document.body as HTMLElement).innerText || document.body.textContent || "";
                     // If we see our username, we can click continue.
-                    if (bodyText.includes(targetUsername)) {
+                    // Case-insensitive check to be safe
+                    if (bodyText.toLowerCase().includes(targetUsername.toLowerCase())) {
                         return continueElem.closest('button, a, div[role="button"]') || continueElem;
                     }
                 }
@@ -545,7 +546,8 @@ export class IgClient {
 
         try {
             // Strategy 1: Standard Name
-            await this.page.waitForSelector('input[name="username"]', { timeout: 10000 });
+            // Ensure we wait for a VISIBLE input, so we don't get stuck on hidden ones.
+            await this.page.waitForSelector('input[name="username"]', { visible: true, timeout: 10000 });
         } catch (e) {
             logger.warn("Standard input[name='username'] not found. Trying alternatives...");
 
