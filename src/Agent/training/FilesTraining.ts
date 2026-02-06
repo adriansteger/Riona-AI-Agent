@@ -1,12 +1,12 @@
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
-import textract from 'textract';
+
 import csvParser from 'csv-parser';
 import { Readable } from 'stream';
 import fs from 'fs';
 import path from 'path';
 
-export type SupportedFileType = 'pdf' | 'doc' | 'docx' | 'csv' | 'txt';
+export type SupportedFileType = 'pdf' | 'docx' | 'csv' | 'txt';
 
 export async function parseFile(fileBuffer: Buffer, fileType: SupportedFileType): Promise<string> {
     let content = '';
@@ -17,13 +17,6 @@ export async function parseFile(fileBuffer: Buffer, fileType: SupportedFileType)
     } else if (fileType === 'docx') {
         const result = await mammoth.extractRawText({ buffer: fileBuffer });
         content = result.value;
-    } else if (fileType === 'doc') {
-        content = await new Promise<string>((resolve, reject) => {
-            textract.fromBufferWithMime('application/msword', fileBuffer, (error, text) => {
-                if (error) reject(error);
-                else resolve(text);
-            });
-        });
     } else if (fileType === 'csv') {
         content = await new Promise<string>((resolve, reject) => {
             const results: string[] = [];
@@ -50,7 +43,7 @@ export async function parseFile(fileBuffer: Buffer, fileType: SupportedFileType)
 async function testParse() {
     try {
         // Define the file path and type
-        const filePath = path.join(__dirname, 'test.txt'); 
+        const filePath = path.join(__dirname, 'test.txt');
         const fileType: SupportedFileType = 'txt'; // Change to match your test file's format
 
         // Read the file into a buffer
