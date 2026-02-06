@@ -456,10 +456,17 @@ export class IgClient {
 
                 // PRIORITY 0: Saved Account Password Prompt (Match)
                 // If we see our username AND a password field, we should just login, NOT switch.
+                const isVisible = (el: Element | null) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
+                };
+
                 const passwordInput = document.querySelector('input[name="password"]');
                 const usernameInput = document.querySelector('input[name="username"]');
 
-                if (passwordInput && !usernameInput && bodyText.includes(targetUsername)) {
+                // Check visibility to avoid hidden inputs triggering false negatives
+                if (passwordInput && isVisible(passwordInput) && (!usernameInput || !isVisible(usernameInput)) && bodyText.includes(targetUsername)) {
                     // We are on the correct "Saved Account" screen. Return null so we fall through to the password-filling logic below.
                     return null;
                 }
@@ -502,11 +509,24 @@ export class IgClient {
                 await (btnElement as any).click();
                 await delay(3000); // Wait for transition
             } else {
-                // Fallback: existing password-only check
-                const hasPassword = await this.page!.$('input[name="password"], input[type="password"]') !== null;
-                const hasUsername = await this.page!.$('input[name="username"]') !== null;
+                // Fallback: existing password-only check (checking VISIBILITY)
+                const { hasVisiblePassword, hasVisibleUsername } = await this.page!.evaluate(() => {
+                    const passEl = document.querySelector('input[name="password"], input[type="password"]');
+                    const userEl = document.querySelector('input[name="username"]');
 
-                if (hasPassword && !hasUsername) {
+                    const isVisible = (el: Element | null) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
+                    };
+
+                    return {
+                        hasVisiblePassword: isVisible(passEl),
+                        hasVisibleUsername: isVisible(userEl)
+                    };
+                });
+
+                if (hasVisiblePassword && !hasVisibleUsername) {
                     logger.info("Detected 'Saved Account' login (Password-only). Attempting to fill password...");
                     await this.page!.type('input[name="password"], input[type="password"]', this.password);
                     await delay(500);
