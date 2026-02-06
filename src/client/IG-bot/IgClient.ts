@@ -462,11 +462,14 @@ export class IgClient {
                     return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
                 };
 
-                const passwordInput = document.querySelector('input[name="password"]');
+                const passwordInput = document.querySelector('input[name="password"], input[type="password"]');
                 const usernameInput = document.querySelector('input[name="username"]');
 
                 // Check visibility to avoid hidden inputs triggering false negatives
-                if (passwordInput && isVisible(passwordInput) && (!usernameInput || !isVisible(usernameInput)) && bodyText.includes(targetUsername)) {
+                // We also check case-insensitively for the username on the page
+                if (passwordInput && isVisible(passwordInput) &&
+                    (!usernameInput || !isVisible(usernameInput)) &&
+                    bodyText.toLowerCase().includes(targetUsername.toLowerCase())) {
                     // We are on the correct "Saved Account" screen. Return null so we fall through to the password-filling logic below.
                     return null;
                 }
