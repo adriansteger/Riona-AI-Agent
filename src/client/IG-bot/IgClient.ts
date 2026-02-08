@@ -68,12 +68,15 @@ export class IgClient {
         if (!this.page) return false;
         try {
             return await this.page.evaluate(() => {
-                const home = document.querySelector('svg[aria-label="Home"]');
-                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
-                const create = document.querySelector('svg[aria-label="New Post"]');
-                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
-                const search = document.querySelector('svg[aria-label="Search"]');
-                return !!(home || direct || create || activity || search);
+                // Stricter checks: Public pages can have Search or even generic icons.
+                // We require stronger signals of a logged-in session.
+                const home = document.querySelector('svg[aria-label="Home"]'); // Feed
+                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]'); // DMs
+                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]'); // Hearts
+                const profile = document.querySelector('img[alt*="profile picture"]'); // Nav profile pic
+
+                // Use a combination. 'Search' is too generic (public search exists).
+                return !!(home || direct || activity || profile);
             });
         } catch (e) { return false; }
     }
@@ -525,7 +528,7 @@ export class IgClient {
             if (btnElement) {
                 logger.info("Found Interstitial Login Button (Switch/Continue). Clicking...");
                 await (btnElement as any).click();
-                await delay(3000); // Wait for transition
+                await delay(5000); // Wait for transition (increased from 3000)
 
                 // CRITICAL: Check if this action actually logged us in!
                 if (await this.isLoggedIn()) {
@@ -1879,10 +1882,26 @@ export class IgClient {
                     // We need to click the PARENT element usually (the button), not just the SVG
                     // --- NAVIGATION TO NEXT POST ---
                     try {
-                        // Robustly find the next arrow
+                        // Robustly find the next arrow using JS filtering for better partial matching
                         const nextElement = await this.page.evaluateHandle(() => {
-                            const svgs = Array.from(document.querySelectorAll('svg[aria-label="Next"]'));
-                            if (svgs.length > 0) return svgs[0].closest('button') || svgs[0].closest('a') || svgs[0];
+                            // Focus on buttons/links inside the dialog (modal) if possible, or global if not
+                            const container = document.querySelector('div[role="dialog"]') || document;
+                            const candidates = Array.from(container.querySelectorAll('button, a, div[role="button"]'));
+
+                            // Find button with "next" or "chevron" in aria-label (on self or child SVG)
+                            // STARTING FROM THE END because Next button is usually on the right/bottom
+                            for (let i = candidates.length - 1; i >= 0; i--) {
+                                const el = candidates[i];
+                                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                                const svgLabel = (el.querySelector('svg')?.getAttribute('aria-label') || '').toLowerCase();
+
+                                if (label.includes('next') || label.includes('chevron') ||
+                                    svgLabel.includes('next') || svgLabel.includes('chevron')) {
+                                    // Verify visibility
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.width > 0 && rect.height > 0) return el;
+                                }
+                            }
                             return null;
                         }).catch((e: Error) => {
                             this.logger.warn(`Navigation selector failed (frame detached?): ${e.message}`);
