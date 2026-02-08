@@ -1487,16 +1487,17 @@ export class IgClient {
 
                     // 1. Detect conversation partner username from Header
                     // Header usually contains h1 or h2 with username
+                    // 1. Detect conversation partner username from Header
+                    // Header usually contains h1 or h2 with username
+                    // PROMPTING FIX: Verify we are talking to the right person
                     const partnerUsername = await this.page.evaluate(() => {
-                        const headers = Array.from(document.querySelectorAll('h1, h2, h3, span[dir="auto"]'));
-                        // Look for the header text that matches likely a username (simplified)
-                        // Or just grab the text from the top bar ?
-                        // Better: We clicked a thread earlier. The text of that thread usually contains the name. 
-                        // But we lost that ref.
-                        // Let's look for the main header in the conversation column (right pane).
-                        // Usually specific classes.
-                        // Fallback: Use "User" if not found.
                         const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
+                        // Fallback to "Message [Username]..." placeholder
+                        if (!header) {
+                            const textBox = document.querySelector('div[role="textbox"]');
+                            const label = textBox?.getAttribute('aria-label'); // "Message name..."
+                            if (label) return label.replace('Message', '').trim();
+                        }
                         return header?.textContent?.trim() || "User";
                     });
 
@@ -1570,12 +1571,16 @@ export class IgClient {
                         const historyText = history.map(h => h.isMine ? `[Me]: ${h.text}` : `[Him]: ${h.text}`).join('\n');
 
                         // Construct Personalized Prompt
-                        const charName = this.character?.aiPersona?.name || "User";
+                        const charName = this.character?.aiPersona?.name || this.character?.name || "User";
                         const charBio = (this.character?.bio || []).join(" ");
                         const charLore = (this.character?.lore || []).join(" ");
                         const charTopics = (this.character?.topics || []).join(", ");
                         const charAdjectives = (this.character?.adjectives || []).join(", ");
                         const charStyle = (this.character?.style?.all || []).join(" ");
+
+                        // NEW: Explicit Goal & Location from JSON
+                        const charGoal = this.character?.goal || "Engage naturally.";
+                        const charLocation = this.character?.location || "Unknown";
 
                         const prompt = `You are ${charName} on Instagram.
                     
@@ -1583,6 +1588,9 @@ export class IgClient {
                     Your Lore/Backstory: ${charLore}
                     Your Interests: ${charTopics}
                     Your Style/Tone: ${charAdjectives} ${charStyle}
+                    Your Location: ${charLocation}
+                    
+                    Your Main Goal: ${charGoal}
                     
                     You are replying to a DM thread with user: "${partnerUsername}".
 
