@@ -514,9 +514,11 @@ export class IgClient {
                 await delay(3000); // Wait for transition
             } else {
                 // Fallback: existing password-only check (checking VISIBILITY)
-                const { hasVisiblePassword, hasVisibleUsername } = await this.page!.evaluate(() => {
+                // Relaxed condition: If body clearly mentions our username, we prioritize password entry even if a username field is technically visible (e.g. in background).
+                const { hasVisiblePassword, hasVisibleUsername, bodyHasUsername } = await this.page!.evaluate((targetUsername) => {
                     const passEl = document.querySelector('input[name="password"], input[type="password"]');
                     const userEl = document.querySelector('input[name="username"]');
+                    const bodyText = document.body.innerText || document.body.textContent || "";
 
                     const isVisible = (el: Element | null) => {
                         if (!el) return false;
@@ -526,13 +528,32 @@ export class IgClient {
 
                     return {
                         hasVisiblePassword: isVisible(passEl),
-                        hasVisibleUsername: isVisible(userEl)
+                        hasVisibleUsername: isVisible(userEl),
+                        bodyHasUsername: bodyText.toLowerCase().includes(targetUsername.toLowerCase())
                     };
-                });
+                }, this.username);
 
-                if (hasVisiblePassword && !hasVisibleUsername) {
+                // If we see a password field, AND (no username field OR we see our username text implying Saved Account mode)
+                if (hasVisiblePassword && (!hasVisibleUsername || bodyHasUsername)) {
                     logger.info("Detected 'Saved Account' login (Password-only). Attempting to fill password...");
-                    await this.page!.type('input[name="password"], input[type="password"]', this.password);
+
+                    // Focus the best password field (last visible one to handle overlays)
+                    await this.page!.evaluate(() => {
+                        const inputs = Array.from(document.querySelectorAll('input[type="password"]'));
+                        const visibleInputs = inputs.filter(el => {
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
+                        });
+
+                        if (visibleInputs.length > 0) {
+                            // Pick the last visible one (topmost in z-index usually, or last appended modal)
+                            const bestInput = visibleInputs[visibleInputs.length - 1];
+                            (bestInput as HTMLElement).focus();
+                        }
+                    });
+
+                    await delay(500);
+                    await this.page!.keyboard.type(this.password);
                     await delay(500);
                     // Try to submit immediately
                     await this.page!.keyboard.press('Enter');
