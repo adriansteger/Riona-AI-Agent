@@ -512,7 +512,19 @@ export class IgClient {
                 logger.info("Found Interstitial Login Button (Switch/Continue). Clicking...");
                 await (btnElement as any).click();
                 await delay(3000); // Wait for transition
-            } else {
+
+                // CRITICAL: Check if this action actually logged us in!
+                if (await this.isConnected()) {
+                    logger.info("Interstitial action successfully logged us in. Skipping remaining login steps.");
+                    return;
+                }
+            }
+
+            // Proceed to check for password input if we are not logged in yet.
+            // This handles two cases:
+            // 1. We didn't find an interstitial button, so we check if it's a password-only screen.
+            // 2. We DID click the button (e.g. "Continue"), but it led to a password prompt (not auto-login).
+            {
                 // Fallback: existing password-only check (checking VISIBILITY)
                 // Relaxed condition: If body clearly mentions our username, we prioritize password entry even if a username field is technically visible (e.g. in background).
                 const { hasVisiblePassword, hasVisibleUsername, bodyHasUsername } = await this.page!.evaluate((targetUsername) => {
