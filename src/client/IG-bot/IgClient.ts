@@ -64,6 +64,20 @@ export class IgClient {
         return !!(this.browser && this.browser.isConnected());
     }
 
+    private async isLoggedIn(): Promise<boolean> {
+        if (!this.page) return false;
+        try {
+            return await this.page.evaluate(() => {
+                const home = document.querySelector('svg[aria-label="Home"]');
+                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
+                const create = document.querySelector('svg[aria-label="New Post"]');
+                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
+                const search = document.querySelector('svg[aria-label="Search"]');
+                return !!(home || direct || create || activity || search);
+            });
+        } catch (e) { return false; }
+    }
+
     async init() {
         if (this.isConnected()) {
             this.logger.info("Browser already active and connected. Skipping launch.");
@@ -514,7 +528,7 @@ export class IgClient {
                 await delay(3000); // Wait for transition
 
                 // CRITICAL: Check if this action actually logged us in!
-                if (await this.isConnected()) {
+                if (await this.isLoggedIn()) {
                     logger.info("Interstitial action successfully logged us in. Skipping remaining login steps.");
                     return;
                 }
@@ -524,7 +538,7 @@ export class IgClient {
             // This handles two cases:
             // 1. We didn't find an interstitial button, so we check if it's a password-only screen.
             // 2. We DID click the button (e.g. "Continue"), but it led to a password prompt (not auto-login).
-            {
+            if (!interstitialAction || !(await this.isLoggedIn())) {
                 // Fallback: existing password-only check (checking VISIBILITY)
                 // Relaxed condition: If body clearly mentions our username, we prioritize password entry even if a username field is technically visible (e.g. in background).
                 const { hasVisiblePassword, hasVisibleUsername, bodyHasUsername } = await this.page!.evaluate((targetUsername) => {
