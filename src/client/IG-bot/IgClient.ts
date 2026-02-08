@@ -1953,6 +1953,9 @@ export class IgClient {
                         } else {
                             this.logger.warn(`Error navigating to next post: ${e.message}`);
                         }
+                        if (this.emailService && !e.message?.includes('detached')) {
+                            this.emailService.sendErrorAlert(this.username, e.message || "Unknown Start", "Hashtag Navigation Failed").catch(() => { });
+                        }
                         break;
                     }
                 } catch (e) {
@@ -2218,6 +2221,9 @@ export class IgClient {
                     this.logger.error("Browser window closed unexpectedly (Crash or User Action). Ending session.");
                 } else {
                     this.logger.error(`Error interacting with post ${postIndex}: ${error.message}`);
+                }
+                if (this.emailService) {
+                    this.emailService.sendErrorAlert(this.username, error.message || "Unknown", "Feed Interaction Loop").catch(() => { });
                 }
                 break;
             }

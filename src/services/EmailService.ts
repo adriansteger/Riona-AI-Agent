@@ -139,4 +139,36 @@ export class EmailService {
             logger.error(`Failed to send Rate Limit alert email: ${error}`);
         }
     }
+
+    async sendErrorAlert(username: string, errorMsg: string, context: string, toEmail: string = this.config.to) {
+        if (!toEmail) {
+            logger.warn("Cannot send Error alert: No recipient email configured.");
+            return;
+        }
+
+        const subject = `❌ ERROR/CRASH: Bot Stuck for ${username}`;
+        const html = `
+            <h2>Bot Encountered an Error</h2>
+            <p><strong>Account:</strong> ${username}</p>
+            <p><strong>Context:</strong> ${context}</p>
+            <p><strong>Error:</strong> <pre>${errorMsg}</pre></p>
+            <br />
+            <p>The bot session for this account has been terminated or paused.</p>
+            <p><em>Sent by Riona AI Agent</em></p>
+        `;
+
+        const mailOptions = {
+            from: this.config.from || this.config.user,
+            to: toEmail,
+            subject: subject,
+            html: html
+        };
+
+        try {
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`Error alert email sent to ${toEmail} for account ${username}`);
+        } catch (error) {
+            logger.error(`Failed to send Error alert email: ${error}`);
+        }
+    }
 }

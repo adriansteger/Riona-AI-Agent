@@ -230,8 +230,12 @@ const processAccount = async (account: any, emailService?: EmailService) => {
       accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
     }
 
-  } catch (error) {
+  } catch (error: any) {
     accountLogger.error(`Error processing account ${account.id}: ${error}`);
+    if (emailService) {
+      // Use the passed emailService (which is the GLOBAL alert service if configured)
+      emailService.sendErrorAlert(account.username, error.message || String(error), "Account Processing Crash").catch(() => { });
+    }
   }
 };
 
