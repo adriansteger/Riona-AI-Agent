@@ -1786,42 +1786,50 @@ export class IgClient {
                 const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
                 if (canLike) {
                     try {
-                        // Wait for like button to be visible in the modal
-                        // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
-                        // Structure: section (actions) -> span -> button -> svg[aria-label="Like"]
-                        let likeSelector = 'section svg[aria-label="Like"]';
-                        let likeButton = await this.page.$(likeSelector);
+                        // OPTIMIZATION: Check for "Unlike" (Already Liked) FIRST to avoid wasted fallback searches
+                        // Structure: section (actions) -> span -> button -> svg[aria-label="Unlike"]
+                        const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
+                        if (await this.page.$(strictUnlikeSelector)) {
+                            this.logger.info(`Post ${postsProcessed + 1} already liked.`);
+                        } else {
+                            // Wait for like button to be visible in the modal
+                            // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
+                            // Structure: section (actions) -> span -> button -> svg[aria-label="Like"]
+                            let likeSelector = 'section svg[aria-label="Like"]';
+                            let likeButton = await this.page.$(likeSelector);
 
-                        // FALLBACK: If strict selector fails (e.g. Reels view), try finding ANY like button that isn't a comment
-                        if (!likeButton) {
-                            this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
-                            const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
-                            for (const btn of potentialButtons) {
-                                // Exclude if inside a list (ul) or small comment container
-                                const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]')); // Comments often in divs with role=button acting as hearts
-                                if (!isComment) {
-                                    likeButton = btn as ElementHandle; // Found a likely candidate
-                                    this.logger.info("Found fallback like button!");
-                                    break;
+                            // FALLBACK: If strict selector fails (e.g. Reels view), try finding ANY like button that isn't a comment
+                            if (!likeButton) {
+                                // Double check generic unlike before expensive scan
+                                if (await this.page.$('svg[aria-label="Unlike"]')) {
+                                    this.logger.info(`Post ${postsProcessed + 1} already liked (Fallback).`);
+                                } else {
+                                    this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
+                                    const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
+                                    for (const btn of potentialButtons) {
+                                        // Exclude if inside a list (ul) or small comment container
+                                        const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]')); // Comments often in divs with role=button acting as hearts
+                                        if (!isComment) {
+                                            likeButton = btn as ElementHandle; // Found a likely candidate
+                                            this.logger.info("Found fallback like button!");
+                                            break;
+                                        }
+                                    }
+
+                                    if (!likeButton) {
+                                        this.logger.info(`Like button not found for post ${postsProcessed + 1}.`);
+                                    }
                                 }
                             }
-                        }
 
-                        if (likeButton) {
-                            const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
-                            if (isConnected) {
-                                this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
-                                await likeButton.click();
-                                await delay(1000 + Math.random() * 1000);
-                                activityTracker.trackAction('likes');
-                            }
-                        } else {
-                            // Maybe already liked?
-                            const unlikeSelector = 'svg[aria-label="Unlike"]'; // Broaden unlike check too
-                            if (await this.page.$(unlikeSelector)) {
-                                this.logger.info(`Post ${postsProcessed + 1} already liked.`);
-                            } else {
-                                this.logger.info(`Like button not found for post ${postsProcessed + 1}.`);
+                            if (likeButton) {
+                                const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                                if (isConnected) {
+                                    this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
+                                    await likeButton.click();
+                                    await delay(1000 + Math.random() * 1000);
+                                    activityTracker.trackAction('likes');
+                                }
                             }
                         }
                     } catch (e) {
