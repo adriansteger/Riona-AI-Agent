@@ -1660,8 +1660,13 @@ export class IgClient {
                                 await this.page.keyboard.press('Enter');
                                 this.logger.info("DM Sent (via Enter key).");
                                 activityTracker.trackAction('dms');
-                                processedCount++;
                             }
+
+                            // RATE LIMITING: Wait 10s between DMs to avoid 429s (Gemini has RPM limits)
+                            this.logger.info("Waiting 10s before next DM to respect rate limits...");
+                            await delay(10000);
+
+                            processedCount++;
                         }
                     }
                     // Random delay between messages in batch

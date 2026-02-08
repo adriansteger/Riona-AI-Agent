@@ -70,6 +70,8 @@ export async function runAgent(
         `---GEMINI_API_KEY_${apiKeyIndex + 1} limit exhausted, switching to the next API key...`
       );
       try {
+        // Simple backoff
+        await new Promise(resolve => setTimeout(resolve, 2000));
         geminiApiKey = getNextAgentApiKey();
         return runAgent(schema, prompt, currentAgentApiKeyIndex);
       } catch (keyError) {
