@@ -38,7 +38,25 @@ export class EmailService {
         this.transporter = nodemailer.createTransport(transportOptions);
     }
 
+    private alertCooldowns = new Map<string, number>();
+
+    private shouldSendAlert(key: string, cooldownMinutes: number): boolean {
+        const lastSent = this.alertCooldowns.get(key) || 0;
+        const now = Date.now();
+        const cooldownMs = cooldownMinutes * 60 * 1000;
+
+        if (now - lastSent < cooldownMs) {
+            logger.warn(`Skipping alert for '${key}' (Cooldown active: ${Math.ceil((cooldownMs - (now - lastSent)) / 60000)}m remaining)`);
+            return false;
+        }
+
+        this.alertCooldowns.set(key, now);
+        return true;
+    }
+
     async sendJobAlert(jobTitle: string, jobCompany: string, jobUrl: string, platform: string, toEmail: string) {
+        // Job alerts are unique per job (hopefully), so maybe no strict cooldown needed per job?
+        // But let's leave it as is for now, assuming JobClient handles duplicate job filtering.
         const subject = `🔥 New Job Alert: ${jobTitle} at ${jobCompany}`;
         const html = `
             <h2>New Job Found on ${platform}</h2>
@@ -75,6 +93,9 @@ export class EmailService {
             return;
         }
 
+        const alertKey = `captcha:${username}`;
+        if (!this.shouldSendAlert(alertKey, 30)) return; // 30 min cooldown
+
         const subject = `⚠️ ACTION REQUIRED: reCAPTCHA on ${username}`;
         const html = `
             <h2>reCAPTCHA Detected for ${username}</h2>
@@ -103,6 +124,8 @@ export class EmailService {
             logger.info(`CAPTCHA alert email sent to ${toEmail} for account ${username}`);
         } catch (error) {
             logger.error(`Failed to send CAPTCHA alert email: ${error}`);
+            // If failed, maybe reset cooldown so it tries again sooner?
+            this.alertCooldowns.delete(alertKey);
         }
     }
 
@@ -111,6 +134,9 @@ export class EmailService {
             logger.warn("Cannot send Rate Limit alert: No recipient email configured.");
             return;
         }
+
+        const alertKey = `ratelimit:${username}`;
+        if (!this.shouldSendAlert(alertKey, 60)) return; // 60 min cooldown
 
         const subject = `⛔ RATE LIMITED (429): ${username} Paused`;
         const html = `
@@ -137,6 +163,7 @@ export class EmailService {
             logger.info(`Rate Limit alert email sent to ${toEmail} for account ${username}`);
         } catch (error) {
             logger.error(`Failed to send Rate Limit alert email: ${error}`);
+            this.alertCooldowns.delete(alertKey);
         }
     }
 
@@ -145,6 +172,12 @@ export class EmailService {
             logger.warn("Cannot send Error alert: No recipient email configured.");
             return;
         }
+
+        // Context-aware key to allow different errors to trigger different alerts?
+        // Or just blanket error spam protection for the account?
+        // Let's go with blanket account protection for now to be safe.
+        const alertKey = `error:${username}`;
+        if (!this.shouldSendAlert(alertKey, 15)) return; // 15 min cooldown
 
         const subject = `❌ ERROR/CRASH: Bot Stuck for ${username}`;
         const html = `
@@ -169,6 +202,7 @@ export class EmailService {
             logger.info(`Error alert email sent to ${toEmail} for account ${username}`);
         } catch (error) {
             logger.error(`Failed to send Error alert email: ${error}`);
+            this.alertCooldowns.delete(alertKey);
         }
     }
 
@@ -177,6 +211,9 @@ export class EmailService {
             logger.warn("Cannot send Action Block alert: No recipient email configured.");
             return;
         }
+
+        const alertKey = `actionblock:${username}`;
+        if (!this.shouldSendAlert(alertKey, 60)) return; // 60 min cooldown
 
         const subject = `⛔ ACTION BLOCKED: ${username} Soft Blocked`;
         const html = `
@@ -202,6 +239,7 @@ export class EmailService {
             logger.info(`Action Block alert email sent to ${toEmail} for account ${username}`);
         } catch (error) {
             logger.error(`Failed to send Action Block alert email: ${error}`);
+            this.alertCooldowns.delete(alertKey);
         }
     }
 }
