@@ -171,4 +171,37 @@ export class EmailService {
             logger.error(`Failed to send Error alert email: ${error}`);
         }
     }
+
+    async sendActionBlockAlert(username: string, context: string, toEmail: string = this.config.to) {
+        if (!toEmail) {
+            logger.warn("Cannot send Action Block alert: No recipient email configured.");
+            return;
+        }
+
+        const subject = `⛔ ACTION BLOCKED: ${username} Soft Blocked`;
+        const html = `
+            <h2>Instagram Soft Block Detected</h2>
+            <p><strong>Account:</strong> ${username}</p>
+            <p><strong>Context:</strong> ${context}</p>
+            <p><strong>Message:</strong> "Try Again Later" popup detected.</p>
+            <br />
+            <p>The bot has paused execution for this account to prevent a permanent ban.</p>
+            <p><strong>Recommended Action:</strong> Manual login and verification might be required, or simply wait 24-48 hours.</p>
+            <p><em>Sent by Riona AI Agent</em></p>
+        `;
+
+        const mailOptions = {
+            from: this.config.from || this.config.user,
+            to: toEmail,
+            subject: subject,
+            html: html
+        };
+
+        try {
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`Action Block alert email sent to ${toEmail} for account ${username}`);
+        } catch (error) {
+            logger.error(`Failed to send Action Block alert email: ${error}`);
+        }
+    }
 }

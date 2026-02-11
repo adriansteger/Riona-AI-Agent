@@ -779,6 +779,38 @@ export class IgClient {
         }
     }
 
+
+
+    // Check for "Try Again Later" (Soft Block)
+    private async checkActionBlock(context: string) {
+        if (!this.page) return;
+        try {
+            const blockDialog = await this.page.evaluate(() => {
+                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                return dialogs.find(d => {
+                    const text = (d as HTMLElement).innerText || "";
+                    return text.includes("Try Again Later") && text.includes("restrict certain activity");
+                }) ? true : false;
+            });
+
+            if (blockDialog) {
+                this.logger.warn(`Action Block detected during: ${context}`);
+                if (this.emailService) {
+                    await this.emailService.sendActionBlockAlert(this.username, context);
+                }
+                // Take debug screenshot
+                try {
+                    await this.page.screenshot({ path: `logs/action_block_${this.username}_${Date.now()}.png` });
+                } catch { }
+
+                throw new Error("Action Blocked by Instagram (Try Again Later)");
+            }
+        } catch (e: any) {
+            if (e.message && e.message.includes("Action Blocked")) throw e;
+            // Ignore other errors during check
+        }
+    }
+
     async handleRecaptcha() {
         if (!this.page) return;
 
@@ -1852,6 +1884,10 @@ export class IgClient {
                                     this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
                                     await likeButton.click();
                                     await delay(1000 + Math.random() * 1000);
+
+                                    // CHECK FOR ACTION BLOCK
+                                    await this.checkActionBlock("Hashtag Like Action");
+
                                     activityTracker.trackAction('likes');
                                 }
                             }
@@ -2125,6 +2161,8 @@ export class IgClient {
 
                                 // CHECK FOR AUTH WALL / SESSION EXPIRY IMMEDIATELLY
                                 await this.checkAuthWall();
+                                // CHECK FOR ACTION BLOCK (Soft Block)
+                                await this.checkActionBlock("Hashtag Like Action");
 
                                 console.log(`Post ${postIndex} liked.`);
                                 activityTracker.trackAction('likes');
@@ -2208,6 +2246,11 @@ export class IgClient {
                                 // Click logic...
                                 await (postButtonElement as puppeteer.ElementHandle<Element>).click();
                                 console.log(`Comment posted on post ${postIndex}.`);
+
+                                // CHECK FOR ACTION BLOCK (Soft Block)
+                                await delay(2000); // Wait for popup
+                                await this.checkActionBlock("Hashtag Comment Action");
+
                                 activityTracker.trackAction('comments');
                                 // Wait for comment to be posted and UI to update
                                 await delay(2000);
