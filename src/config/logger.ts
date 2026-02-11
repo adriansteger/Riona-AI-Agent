@@ -5,9 +5,10 @@ import fs from 'fs';
 import { setup_HandleError } from "../utils";
 
 // Ensure the logs directory exists
-const logDir = path.join(__dirname, '../logs');
-if (!fs.existsSync(logDir)) {
-    fs.mkdirSync(logDir, { recursive: true });
+const logDir = path.join(process.cwd(), 'logs');
+const systemLogDir = path.join(logDir, 'system');
+if (!fs.existsSync(systemLogDir)) {
+    fs.mkdirSync(systemLogDir, { recursive: true });
 }
 
 // Define log levels and their corresponding colors
@@ -72,7 +73,7 @@ const logger = createLogger({
             ),
         }),
         new transports.DailyRotateFile({
-            filename: "logs/%DATE%-combined.log",
+            filename: "logs/system/%DATE%-combined.log",
             datePattern: "YYYY-MM-DD",
             level: "info",
             maxFiles: "14d", // Keep logs for the last 14 days
@@ -81,7 +82,7 @@ const logger = createLogger({
             format: format.combine(format.timestamp(), format.json()),
         }), // Daily rotating log file for general info
         new transports.DailyRotateFile({
-            filename: "logs/%DATE%-error.log",
+            filename: "logs/system/%DATE%-error.log",
             datePattern: "YYYY-MM-DD",
             level: "error",
             maxFiles: "14d", // Keep logs for the last 14 days
@@ -90,7 +91,7 @@ const logger = createLogger({
             format: format.combine(format.timestamp(), format.json()),
         }), // Daily rotating error log
         new transports.DailyRotateFile({
-            filename: "logs/%DATE%-debug.log",
+            filename: "logs/system/%DATE%-debug.log",
             datePattern: "YYYY-MM-DD",
             level: "debug",
             maxFiles: "14d", // Keep logs for the last 14 days
@@ -102,6 +103,7 @@ const logger = createLogger({
 });
 
 // Catch unhandled promise rejections
+// (Moved below to export function setupErrorHandlers)
 
 export function setupErrorHandlers(): void {
     // Catch unhandled promise rejections
@@ -125,18 +127,51 @@ export function setupErrorHandlers(): void {
 // ... existing logger ...
 
 export const createAccountLogger = (accountId: string) => {
+    // Sanitize accountId for filesystem safety
+    const safeId = accountId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const accountLogDir = path.join(logDir, 'accounts', safeId);
+
+    if (!fs.existsSync(accountLogDir)) {
+        fs.mkdirSync(accountLogDir, { recursive: true });
+    }
+
     return createLogger({
         level: "info",
         format: format.combine(
-            format.timestamp(),
+            format.timestamp({ format: customTimestamp }),
             format.printf(({ timestamp, level, message }) => {
                 return `[${timestamp}] ${level}: ${message}`;
             })
         ),
         transports: [
-            new transports.Console(),
-            new transports.File({ filename: `logs/${accountId}.log` }),
-            new transports.File({ filename: `logs/${accountId}-error.log`, level: "error" }),
+            new transports.Console({
+                level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+                format: format.combine(
+                    format.colorize(),
+                    format.printf(({ timestamp, level, message }) => {
+                        const emoji = getEmojiForLevel(level); // Reuse emoji logic if possible or simple text
+                        return `${timestamp} [${accountId}] ${level}: ${message}`;
+                    })
+                )
+            }),
+            new transports.DailyRotateFile({
+                filename: path.join(accountLogDir, "%DATE%.log"),
+                datePattern: "YYYY-MM-DD",
+                level: "info",
+                maxFiles: "14d",
+                maxSize: "20m",
+                zippedArchive: true,
+                format: format.combine(format.timestamp(), format.json()),
+            }),
+            new transports.DailyRotateFile({
+                filename: path.join(accountLogDir, "%DATE%-error.log"),
+                datePattern: "YYYY-MM-DD",
+                level: "error",
+                maxFiles: "14d",
+                maxSize: "20m",
+                zippedArchive: true,
+                format: format.combine(format.timestamp(), format.json()),
+            }),
         ],
     });
 };
