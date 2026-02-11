@@ -81,6 +81,20 @@ export class IgClient {
         } catch (e) { return false; }
     }
 
+    // Helper for robust navigation
+    private async gotoWithRetry(url: string, options: any = {}, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                await this.page?.goto(url, { timeout: 60000, ...options });
+                return;
+            } catch (e: any) {
+                this.logger.warn(`Navigation attempt ${i + 1}/${retries} failed: ${e.message}`);
+                if (i === retries - 1) throw e;
+                await delay(5000);
+            }
+        }
+    }
+
     async init() {
         if (this.isConnected()) {
             this.logger.info("Browser already active and connected. Skipping launch.");
@@ -311,16 +325,13 @@ export class IgClient {
             await this.loginWithCookies();
         } else if (this.userDataDir) {
             // With persistent profile, cookies are auto-loaded. Just check login state.
+            // 3. Navigate to Instagram (Robust Retry)
             try {
-                await this.page.goto("https://www.instagram.com/", { waitUntil: "networkidle2" });
+                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "networkidle2" });
             } catch (navErr) {
-                this.logger.warn(`Initial navigation failed (${navErr}), Retrying...`);
-                try {
-                    if (this.page.isClosed()) this.page = await this.browser.newPage();
-                    await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
-                } catch (retryErr) {
-                    throw new Error(`Critical: Failed to navigate to Instagram: ${retryErr}`);
-                }
+                this.logger.error(`Critical: Failed to navigate to Instagram after retries: ${navErr}`);
+                if (this.browser) await this.browser.close();
+                throw navErr;
             }
             await delay(2000); // Give it a moment to render
             const currentUrl = this.page.url();
@@ -1934,17 +1945,25 @@ export class IgClient {
                             if (nextElementHandle) {
                                 this.logger.info("Navigating to next post...");
                                 // Click and wait, catching any detachment errors during the transition
-                                await Promise.all([
-                                    (nextElementHandle as puppeteer.ElementHandle<Element>).click(),
-                                    delay(3000 + Math.random() * 2000)
-                                ]);
+                                try {
+                                    await Promise.all([
+                                        (nextElementHandle as puppeteer.ElementHandle<Element>).click(),
+                                        delay(3000 + Math.random() * 2000)
+                                    ]);
+                                } catch (clickErr) {
+                                    this.logger.warn("Click failed, trying ArrowRight key fallback...");
+                                    await this.page.keyboard.press('ArrowRight');
+                                    await delay(3000);
+                                }
                             } else {
                                 this.logger.warn("Next element handle is null. Stopping.");
                                 break;
                             }
                         } else {
-                            this.logger.warn("Next arrow not found. Reached end of available posts?");
-                            break;
+                            // FALLBACK: Try ArrowRight key even if button not found (it might be there but hidden/unlabeled)
+                            this.logger.info("Next arrow not found. Trying ArrowRight key fallback...");
+                            await this.page.keyboard.press('ArrowRight');
+                            await delay(3000);
                         }
 
                     } catch (e: any) {
