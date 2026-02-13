@@ -121,7 +121,8 @@ export class JobClient {
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding',
                 // Essential for Windows to prevent "Occluded" status
-                '--disable-features=CalculateNativeWinOcclusion',
+                '--disable-features=CalculateNativeWinOcclusion,WebRtcHideLocalIpsWithMdns,MediaSessionService',
+                '--deny-permission-prompts',
                 ...(this.proxyUrl ? [`--proxy-server=${this.proxyUrl}`] : []),
             ],
             ignoreHTTPSErrors: true
@@ -136,6 +137,16 @@ export class JobClient {
             this.page = null;
             this.detailsPage = null; // Reset details page
         });
+
+        // BLOCK PERMISSIONS (Camera, Mic, Notifications)
+        try {
+            const context = this.browser.defaultBrowserContext();
+            await context.overridePermissions('https://www.indeed.com', ['camera', 'microphone', 'notifications']);
+            await context.overridePermissions('https://ch.indeed.com', ['camera', 'microphone', 'notifications']); // swiss domain
+            await context.overridePermissions('https://resumate.ch', ['camera', 'microphone', 'notifications']);
+        } catch (err) {
+            logger.warn(`Failed to override permissions: ${err}`);
+        }
 
         this.page = await this.browser.newPage();
 
@@ -164,6 +175,19 @@ export class JobClient {
         await this.page.evaluateOnNewDocument(() => {
             Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
             Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+            // Block Media Devices to prevent "Camera" access requests
+            // @ts-ignore
+            if (navigator.mediaDevices) {
+                // @ts-ignore
+                Object.defineProperty(navigator, 'mediaDevices', {
+                    value: {
+                        getUserMedia: () => Promise.reject(new Error('Blocked by JobBot')),
+                        enumerateDevices: () => Promise.resolve([]),
+                    },
+                    configurable: true,
+                    writable: true
+                });
+            }
         });
 
         await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -182,6 +206,19 @@ export class JobClient {
                 await this.page.evaluateOnNewDocument(() => {
                     Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
                     Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+                    // Block Media Devices
+                    // @ts-ignore
+                    if (navigator.mediaDevices) {
+                        // @ts-ignore
+                        Object.defineProperty(navigator, 'mediaDevices', {
+                            value: {
+                                getUserMedia: () => Promise.reject(new Error('Blocked by JobBot')),
+                                enumerateDevices: () => Promise.resolve([]),
+                            },
+                            configurable: true,
+                            writable: true
+                        });
+                    }
                 });
 
                 await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
