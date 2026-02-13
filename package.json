@@ -61,7 +61,6 @@
     "@types/pdf-parse": "^1.1.4",
     "@types/puppeteer": "^5.4.7",
     "@types/readline-sync": "^1.4.8",
-    "@types/request": "^2.48.12",
     "@types/user-agents": "^1.0.4"
   },
   "overrides": {

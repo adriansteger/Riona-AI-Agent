@@ -1,25 +1,41 @@
 import fs from 'fs';
-import request from 'request';
+
 import logger from '../config/logger';
 
-export const download = function (uri: string, filename: string, callback: (err?: Error) => void): void {
-    request.head(uri, function (err: Error | null, _res: request.Response, _body: any) {
-        if (err) {
-            logger.error(`Error fetching headers for ${uri}: ${err.message}`);
+import axios from 'axios';
+
+export const download = async function (uri: string, filename: string, callback: (err?: Error) => void): Promise<void> {
+    const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const options: any = {
+        responseType: 'stream'
+    };
+
+    if (proxy) {
+        const { HttpsProxyAgent } = require('https-proxy-agent');
+        options.httpsAgent = new HttpsProxyAgent(proxy);
+        options.proxy = false;
+    }
+
+    try {
+        const response = await axios.get(uri, options);
+        const writer = fs.createWriteStream(filename);
+
+        response.data.pipe(writer);
+
+        writer.on('finish', () => {
+            logger.info(`File downloaded successfully from ${uri} to ${filename}`);
+            callback();
+        });
+
+        writer.on('error', (err: any) => {
+            logger.error(`Error writing file to ${filename}: ${err.message}`);
             callback(err);
-            return;
-        }
-        request(uri)
-            .pipe(fs.createWriteStream(filename))
-            .on('error', (err: Error) => {
-                logger.error(`Error downloading file from ${uri}: ${err.message}`);
-                callback(err);
-            })
-            .on('close', () => {
-                logger.info(`File downloaded successfully from ${uri} to ${filename}`);
-                callback();
-            });
-    });
+        });
+
+    } catch (err: any) {
+        logger.error(`Error downloading file from ${uri}: ${err.message}`);
+        callback(err);
+    }
 };
 
 

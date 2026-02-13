@@ -15,7 +15,8 @@
                 "user": "jobbot@ascotech.ch",
                 "pass": "?jg0Iu141",
                 "to": "asco54@gmail.com"
-            }
+            },
+            "proxy": ""
         }
     ]
 }

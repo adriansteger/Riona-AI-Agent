@@ -16,9 +16,16 @@ function cleanHTML(inputHtml: string): string {
 async function scrapeAndCleanContent(url: string): Promise<string | null> {
   try {
     // Launch a Puppeteer browser instance with additional options
+    const args = ["--no-sandbox", "--disable-setuid-sandbox"];
+    if (process.env.HTTPS_PROXY) {
+      args.push(`--proxy-server=${process.env.HTTPS_PROXY}`);
+    } else if (process.env.HTTP_PROXY) {
+      args.push(`--proxy-server=${process.env.HTTP_PROXY}`);
+    }
+
     const browser = await puppeteer.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: args,
     });
     const page = await browser.newPage();
 
@@ -47,9 +54,16 @@ async function scrapeAndCleanContent(url: string): Promise<string | null> {
 // Function to get all links from a given URL
 async function getAllLinks(url: string): Promise<string[]> {
   try {
+    const args = ["--no-sandbox", "--disable-setuid-sandbox"];
+    if (process.env.HTTPS_PROXY) {
+      args.push(`--proxy-server=${process.env.HTTPS_PROXY}`);
+    } else if (process.env.HTTP_PROXY) {
+      args.push(`--proxy-server=${process.env.HTTP_PROXY}`);
+    }
+
     const browser = await puppeteer.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: args,
     });
     const page = await browser.newPage();
 

@@ -28,6 +28,7 @@ interface JobConfig {
     platforms: string[];
     pensum?: string; // Added for User Preferences
     email?: string; // Added for specific email alerts
+    proxy?: string; // Added for proxy support
 }
 
 interface JobData {
@@ -46,6 +47,7 @@ export class JobClient {
     private config: JobConfig;
     private currentTargetUserId: string | null = null;
     private originalConfig: JobConfig;
+    private proxyUrl: string | null = null;
 
     constructor(emailService: EmailService, config: JobConfig) {
         this.emailService = emailService;
@@ -53,8 +55,10 @@ export class JobClient {
         this.originalConfig = { ...config }; // Backup original config
         this.analyzer = new JobAnalyzer();
         this.history = new JobHistory();
-
-
+        if (config.proxy) {
+            this.proxyUrl = config.proxy;
+            logger.info(`JobClient initialized with proxy: ${config.proxy}`);
+        }
     }
 
 
@@ -118,6 +122,7 @@ export class JobClient {
                 '--disable-renderer-backgrounding',
                 // Essential for Windows to prevent "Occluded" status
                 '--disable-features=CalculateNativeWinOcclusion',
+                ...(this.proxyUrl ? [`--proxy-server=${this.proxyUrl}`] : []),
             ],
             ignoreHTTPSErrors: true
         } as any);
@@ -262,9 +267,17 @@ export class JobClient {
             const adminUrl = apiUrl.replace('/jobs', '/admin/pro-users');
 
             logger.info(`Fetching User Queue from: ${adminUrl} `);
-            const response = await axios.get(adminUrl, {
+            const axiosConfig: any = {
                 headers: { 'x-api-key': apiKey }
-            });
+            };
+
+            if (this.proxyUrl) {
+                const { HttpsProxyAgent } = require('https-proxy-agent');
+                axiosConfig.httpsAgent = new HttpsProxyAgent(this.proxyUrl);
+                axiosConfig.proxy = false; // Disable axios default proxy handling to use the agent
+            }
+
+            const response = await axios.get(adminUrl, axiosConfig);
 
             if (response.data?.success && Array.isArray(response.data.users)) {
                 return response.data.users;
@@ -324,12 +337,20 @@ export class JobClient {
             const checkUrl = apiUrl + '/check'; // .../api/jobs/check
             logger.info(`Checking ${urlsToCheck.length} jobs against API...`);
 
+            const axiosConfig: any = {
+                headers: { 'x-api-key': apiKey }
+            };
+
+            if (this.proxyUrl) {
+                const { HttpsProxyAgent } = require('https-proxy-agent');
+                axiosConfig.httpsAgent = new HttpsProxyAgent(this.proxyUrl);
+                axiosConfig.proxy = false;
+            }
+
             const response = await axios.post(checkUrl, {
                 urls: urlsToCheck,
                 targetUserId: this.currentTargetUserId
-            }, {
-                headers: { 'x-api-key': apiKey }
-            });
+            }, axiosConfig);
 
             if (response.data && Array.isArray(response.data.existing)) {
                 const existing = new Set(response.data.existing);
@@ -769,12 +790,20 @@ export class JobClient {
 
             logger.info(logMsg);
 
-            await axios.post(apiUrl, payload, {
+            const axiosConfig: any = {
                 headers: {
                     'Content-Type': 'application/json',
                     'x-api-key': apiToken
                 }
-            });
+            };
+
+            if (this.proxyUrl) {
+                const { HttpsProxyAgent } = require('https-proxy-agent');
+                axiosConfig.httpsAgent = new HttpsProxyAgent(this.proxyUrl);
+                axiosConfig.proxy = false;
+            }
+
+            await axios.post(apiUrl, payload, axiosConfig);
 
             logger.info("Job saved successfully to ResuMate.");
 

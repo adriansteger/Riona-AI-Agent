@@ -40,7 +40,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-      "script-src": ["'self'", "'unsafe-inline'"],
+      "script-src": ["'self'"],
     },
   },
 }));
@@ -52,7 +52,12 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'supersecretkey',
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 2 * 60 * 60 * 1000, sameSite: 'lax' },
+  cookie: {
+    maxAge: 2 * 60 * 60 * 1000,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true
+  },
 }));
 
 import fs from 'fs';
@@ -356,12 +361,15 @@ const runJobBot = async () => {
 
     // Default config (will be overridden by ResuMate API)
     // Use platforms defined in job_accounts.json (first bot)
-    const platforms = jobConfig.jobBots?.[0]?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
+    const botConfig = jobConfig.jobBots?.[0];
+    const platforms = botConfig?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
+    const proxy = botConfig?.proxy;
 
     const defaultJobConfig = {
       keywords: [],
       location: 'Remote',
-      platforms: platforms
+      platforms: platforms,
+      proxy: proxy
     };
 
     const client = new JobClient(emailService, defaultJobConfig);
