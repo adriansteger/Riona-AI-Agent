@@ -475,6 +475,13 @@ export const adrianStyleConfig = {
   },
 
   // ===== POST SCHEDULING =====
+  schedule: {
+    sleepStartHour: 23,
+    sleepEndHour: 7,
+    minRestMinutes: 45,
+    maxRestMinutes: 120
+  },
+
   scheduling: {
     bestTimes: {
       weekdays: ['08:00', '12:30', '18:00', '20:00'],

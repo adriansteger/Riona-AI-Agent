@@ -6,7 +6,7 @@ import cors from "cors";
 import session from 'express-session';
 
 import logger, { setupErrorHandlers } from "./config/logger";
-import { setup_HandleError, ActivityTracker, pLimit } from "./utils";
+import { setup_HandleError, ActivityTracker, pLimit, ScheduleTracker } from "./utils";
 import path from 'path';
 import { connectDB } from "./config/db";
 import apiRoutes from "./routes/api";
@@ -109,9 +109,41 @@ const processAccount = async (account: any, emailService?: EmailService) => {
     // 3. Merge: Account settings take precedence
     const behavior = { ...characterBehavior, ...accountBehavior };
     const limits = { ...characterLimits, ...accountLimits };
+    const scheduleSettings = account.settings?.schedule || {
+      sleepStartHour: 23, // 11 PM
+      sleepEndHour: 7, // 7 AM
+      minRestMinutes: 45, // 45 minutes
+      maxRestMinutes: 120 // 2 hours
+    };
 
     // --- PRE-RUN AVAILABILITY CHECK ---
     const trackerId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
+
+    // Check human-like schedule cycles
+    const scheduleTracker = new ScheduleTracker(trackerId);
+
+    if (ScheduleTracker.isSleepTime(scheduleSettings.sleepStartHour, scheduleSettings.sleepEndHour)) {
+      // Sleep over midnight logic or simple sleep time logic
+      accountLogger.info(`Account is currently in a sleep window (${scheduleSettings.sleepStartHour}:00 - ${scheduleSettings.sleepEndHour}:00). Skipping check.`);
+
+      // Critical: Ensure session is closed during sleep to save memory
+      const existingClient = activeSessions.get(account.id);
+      if (existingClient) {
+        await existingClient.close();
+        activeSessions.delete(account.id);
+        accountLogger.info("Closed persistent session for sleep cycle.");
+      }
+      return;
+    }
+
+    const nextActiveTime = scheduleTracker.getNextActiveTime();
+    if (Date.now() < nextActiveTime) {
+      // Find remaining wait
+      const remainingMinutes = Math.ceil((nextActiveTime - Date.now()) / 60000);
+      accountLogger.info(`Account is resting. Waiting ~${remainingMinutes} minutes before next active cycle.`);
+      return;
+    }
+
     const activityTracker = new ActivityTracker(trackerId);
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
@@ -231,6 +263,12 @@ const processAccount = async (account: any, emailService?: EmailService) => {
           accountLogger.info("[SESSION DEBUG] Decision: KEEP OPEN. (Limits Not Reached)");
         }
       }
+
+      // Update the Rest Cycle
+      // After finishing interactions and checks, the bot rests
+      const restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
+      scheduleTracker.setNextActiveTime(Date.now() + restDelayMs);
+      accountLogger.info(`Account rests. Next active cycle set in ~${Math.round(restDelayMs / 60000)} minutes.`);
 
       accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
     }
