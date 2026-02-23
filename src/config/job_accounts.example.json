@@ -5,19 +5,10 @@
             "enabled": true,
             "preferences": {
                 "platforms": [
-                    "indeed",
-                    "ziprecruiter",
-                    "weworkremotely"
+                    "indeed.ch"
                 ]
             },
-            "emailConfig": {
-                "host": "ascotech.ch",
-                "port": 587,
-                "secure": true,
-                "user": "jobbot@ascotech.ch",
-                "pass": "22fZ8m$2s",
-                "to": "asco54@gmail.com"
-            }
+            "proxy": ""
         }
     ]
 }

@@ -19,6 +19,12 @@
             },
             "limits": {
                 "likesPerHour": 25
+            },
+            "schedule": {
+                "sleepStartHour": 23,
+                "sleepEndHour": 7,
+                "minRestMinutes": 45,
+                "maxRestMinutes": 120
             }
         },
         "userDataDir": "./profiles/account_1",
@@ -44,6 +50,12 @@
             },
             "limits": {
                 "likesPerHour": 25
+            },
+            "schedule": {
+                "sleepStartHour": 23,
+                "sleepEndHour": 7,
+                "minRestMinutes": 45,
+                "maxRestMinutes": 120
             }
         },
         "userDataDir": "./profiles/account_2",
