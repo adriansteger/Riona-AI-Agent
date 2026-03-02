@@ -17,6 +17,7 @@ import { getShouldExitInteractions } from '../../api/agent';
 import { Contact } from '../../models/Contact';
 
 import { EmailService } from "../../services/EmailService";
+import { LikedPost } from "../../models/LikedPost";
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -1845,8 +1846,18 @@ export class IgClient {
                         // OPTIMIZATION: Check for "Unlike" (Already Liked) FIRST to avoid wasted fallback searches
                         // Structure: section (actions) -> span -> button -> svg[aria-label="Unlike"]
                         const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
-                        if (await this.page.$(strictUnlikeSelector)) {
-                            this.logger.info(`Post ${postsProcessed + 1} already liked.`);
+
+                        // Extract Post URL to check DB
+                        const postUrl = await this.page.url();
+                        const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+
+                        if (isAlreadyLikedDB) {
+                            this.logger.info(`Post ${postsProcessed + 1} already liked (found in DB). Skipping.`);
+                            // Do NOT track action
+                        } else if (await this.page.$(strictUnlikeSelector)) {
+                            this.logger.info(`Post ${postsProcessed + 1} already liked (UI).`);
+                            // Also save to DB for future runs to avoid opening
+                            await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
                         } else {
                             // Wait for like button to be visible in the modal
                             // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
@@ -1889,6 +1900,13 @@ export class IgClient {
                                     await this.checkActionBlock("Hashtag Like Action");
 
                                     activityTracker.trackAction('likes');
+
+                                    // Save to DB
+                                    await LikedPost.updateOne(
+                                        { username: this.username, postUrl },
+                                        { $set: { likedAt: new Date() } },
+                                        { upsert: true }
+                                    ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
                                 }
                             }
                         }
@@ -2145,9 +2163,43 @@ export class IgClient {
                     ariaLabel = await likeButton.evaluate((el: Element) => el.getAttribute("aria-label"));
                 }
 
+                // Extract Post URL to check DB
+                // In main feed, it's harder to get the exact post URL without clicking it.
+                // We'll try to find the timestamp link which contains the post URI.
+                const postLinkSelector = `${postSelector} a[href*="/p/"]`;
+                const postLink = await page.$(postLinkSelector);
+                let postUrl = "";
+                if (postLink) {
+                    try {
+                        const href = await postLink.evaluate(el => el.getAttribute("href"));
+                        if (href) {
+                            // Extract just the /p/XXXXX/ part to avoid query params messing it up
+                            const match = href.match(/\/p\/[^\/]+\//);
+                            if (match) {
+                                postUrl = `https://www.instagram.com${match[0]}`;
+                            } else {
+                                postUrl = href.startsWith('http') ? href : `https://www.instagram.com${href}`; // Fallback
+                            }
+
+                            // Remove query parameters to normalize the URL
+                            try {
+                                const parsedUrl = new URL(postUrl);
+                                parsedUrl.search = '';
+                                postUrl = parsedUrl.toString();
+                            } catch (e) { /* ignore url parse error */ }
+                        }
+                    } catch (e) {
+                        this.logger.warn(`Failed to extract post URL for post ${postIndex}`);
+                    }
+                }
+
+                const isAlreadyLikedDB = postUrl ? await LikedPost.exists({ username: this.username, postUrl }) : false;
+
                 // --- LIKING LOGIC ---
                 if (behavior.enableLikes !== false) {
-                    if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
+                    if (isAlreadyLikedDB) {
+                        console.log(`Skipping like for post ${postIndex}: already liked (found in DB).`);
+                    } else if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
                         console.log(`Skipping like: Hourly limit reached (${activityTracker.getRecentCount('likes')}/${maxLikesPerHour}).`);
                     } else if (ariaLabel === "Like" && likeButton) {
                         console.log(`Liking post ${postIndex}...`);
@@ -2166,6 +2218,15 @@ export class IgClient {
 
                                 console.log(`Post ${postIndex} liked.`);
                                 activityTracker.trackAction('likes');
+
+                                // Save to DB
+                                if (postUrl) {
+                                    await LikedPost.updateOne(
+                                        { username: this.username, postUrl },
+                                        { $set: { likedAt: new Date() } },
+                                        { upsert: true }
+                                    ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
+                                }
                             } else {
                                 console.warn(`Like button for post ${postIndex} is detached (skipping).`);
                             }
@@ -2174,6 +2235,10 @@ export class IgClient {
                         }
                     } else if (ariaLabel === "Unlike") {
                         console.log(`Post ${postIndex} is already liked.`);
+                        // Also save to DB for future runs
+                        if (postUrl) {
+                            await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
+                        }
                     } else {
                         console.log(`Like button not found for post ${postIndex}.`);
                     }
