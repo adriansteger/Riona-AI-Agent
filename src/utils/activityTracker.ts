@@ -71,15 +71,15 @@ export class ActivityTracker {
             const weeksActive = Math.floor((Date.now() - firstActive) / (1000 * 60 * 60 * 24 * 7));
             if (weeksActive === 0) {
                 // Week 1: heavily restricted
-                dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.2));
+                dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.5));
             } else if (weeksActive === 1) {
                 // Week 2: moderately restricted
-                dynamicLimit = Math.max(2, Math.floor(baseLimitPerHour * 0.5));
+                dynamicLimit = Math.max(2, Math.floor(baseLimitPerHour * 0.75));
             }
             // Week 3 and beyond: full limits
         } else {
             // First time seeing this account, act extremely safe
-            dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.2));
+            dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.5));
         }
 
         const history = this.getHistory(action);
