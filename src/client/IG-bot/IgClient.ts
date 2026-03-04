@@ -7,7 +7,7 @@ import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
 import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
-import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile } from "../../utils";
+import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile, getHumanLikeDelay } from "../../utils";
 import { runAgent } from "../../Agent";
 import path from "path";
 import { getInstagramCommentSchema, getInstagramDMResponseSchema } from "../../Agent/schema";
@@ -1754,7 +1754,7 @@ export class IgClient {
         limits?: { likesPerHour?: number; commentsPerHour?: number; }
     } = {}) {
         if (!this.page) throw new Error("Page not initialized");
-        const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: false }, limits } = options;
+        const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: true }, limits } = options;
 
         if (!hashtags || hashtags.length === 0) {
             this.logger.warn("No hashtags provided for interaction.");
@@ -1823,7 +1823,7 @@ export class IgClient {
 
             this.logger.info(`Opened #${tag} page. Clicking first post...`);
             await firstPost.click();
-            await delay(3000); // Wait for modal to open
+            await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
 
             let postsProcessed = 0;
             const maxPosts = 10; // Limit for this session
@@ -1851,9 +1851,15 @@ export class IgClient {
                         const postUrl = await this.page.url();
                         const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
 
+                        // Simulating a random skip to add interaction noise
+                        const shouldSkip = Math.random() < 0.2; // 20% chance to skip
+
                         if (isAlreadyLikedDB) {
                             this.logger.info(`Post ${postsProcessed + 1} already liked (found in DB). Skipping.`);
                             // Do NOT track action
+                        } else if (shouldSkip) {
+                            this.logger.info(`Simulating human behavior: randomly skipping post ${postsProcessed + 1} without liking.`);
+                            await delay(getHumanLikeDelay(2000, 1000));
                         } else if (await this.page.$(strictUnlikeSelector)) {
                             this.logger.info(`Post ${postsProcessed + 1} already liked (UI).`);
                             // Also save to DB for future runs to avoid opening
@@ -1894,7 +1900,7 @@ export class IgClient {
                                 if (isConnected) {
                                     this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
                                     await likeButton.click();
-                                    await delay(1000 + Math.random() * 1000);
+                                    await delay(getHumanLikeDelay(1500, 800));
 
                                     // CHECK FOR ACTION BLOCK
                                     await this.checkActionBlock("Hashtag Like Action");
@@ -1939,7 +1945,7 @@ export class IgClient {
                                 if (isConnected) {
                                     this.logger.info(`Liking a comment on post ${postsProcessed + 1}...`);
                                     await btn.click();
-                                    await delay(1000);
+                                    await delay(getHumanLikeDelay(1500, 800));
                                     likedCount++;
                                 }
                             }
@@ -2173,20 +2179,9 @@ export class IgClient {
                     try {
                         const href = await postLink.evaluate(el => el.getAttribute("href"));
                         if (href) {
-                            // Extract just the /p/XXXXX/ part to avoid query params messing it up
-                            const match = href.match(/\/p\/[^\/]+\//);
-                            if (match) {
-                                postUrl = `https://www.instagram.com${match[0]}`;
-                            } else {
-                                postUrl = href.startsWith('http') ? href : `https://www.instagram.com${href}`; // Fallback
-                            }
-
-                            // Remove query parameters to normalize the URL
-                            try {
-                                const parsedUrl = new URL(postUrl);
-                                parsedUrl.search = '';
-                                postUrl = parsedUrl.toString();
-                            } catch (e) { /* ignore url parse error */ }
+                            // Extract just the path part
+                            const urlObj = new URL(href, "https://www.instagram.com");
+                            postUrl = urlObj.pathname;
                         }
                     } catch (e) {
                         this.logger.warn(`Failed to extract post URL for post ${postIndex}`);

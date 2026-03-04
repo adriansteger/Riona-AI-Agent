@@ -56,3 +56,29 @@ export const killChromeProcessByProfile = async (userDataDir: string): Promise<v
         });
     });
 };
+
+/**
+ * Generates a random number with a Gaussian (Normal) distribution.
+ * Uses the Box-Muller transform.
+ */
+export const randomGaussian = (mean: number, stdDev: number): number => {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    const num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    return num * stdDev + mean;
+};
+
+/**
+ * Generates a human-like delay with a defined base and variant spread.
+ * @param baseMs Base delay in milliseconds
+ * @param varianceMs How much variance to add/subtract (in milliseconds)
+ */
+export const getHumanLikeDelay = (baseMs: number, varianceMs: number): number => {
+    // Generate a delay with Gaussian distribution to mimic real human consistency
+    // roughly 68% of delays will fall within standard deviation of varianceMs / 2
+    let delay = randomGaussian(baseMs, varianceMs / 2);
+    // Clamp to min/max
+    delay = Math.max(baseMs - varianceMs, Math.min(baseMs + varianceMs, delay));
+    return Math.floor(delay);
+};

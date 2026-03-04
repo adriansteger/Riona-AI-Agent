@@ -6,6 +6,7 @@ interface ActivityLog {
         likes: number[];    // Array of timestamps
         comments: number[]; // Array of timestamps
         dms: number[];      // Array of timestamps
+        firstActive?: number; // Account warming baseline
     }
 }
 
@@ -44,7 +45,7 @@ export class ActivityTracker {
 
     private getHistory(action: 'likes' | 'comments' | 'dms'): number[] {
         if (!this.data[this.accountId]) {
-            this.data[this.accountId] = { likes: [], comments: [], dms: [] };
+            this.data[this.accountId] = { likes: [], comments: [], dms: [], firstActive: Date.now() };
         }
         return this.data[this.accountId][action] || [];
     }
@@ -59,15 +60,33 @@ export class ActivityTracker {
         }
     }
 
-    public canPerformAction(action: 'likes' | 'comments' | 'dms', limitPerHour: number): boolean {
+    public canPerformAction(action: 'likes' | 'comments' | 'dms', baseLimitPerHour: number): boolean {
         this.data = this.loadData(); // Reload to get latest from other processes
         this.cleanOldEntries();
+
+        // Account warming logic
+        let dynamicLimit = baseLimitPerHour;
+        const firstActive = this.data[this.accountId]?.firstActive;
+        if (firstActive) {
+            const weeksActive = Math.floor((Date.now() - firstActive) / (1000 * 60 * 60 * 24 * 7));
+            if (weeksActive === 0) {
+                // Week 1: heavily restricted
+                dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.2));
+            } else if (weeksActive === 1) {
+                // Week 2: moderately restricted
+                dynamicLimit = Math.max(2, Math.floor(baseLimitPerHour * 0.5));
+            }
+            // Week 3 and beyond: full limits
+        } else {
+            // First time seeing this account, act extremely safe
+            dynamicLimit = Math.max(1, Math.floor(baseLimitPerHour * 0.2));
+        }
 
         const history = this.getHistory(action);
         const oneHourAgo = Date.now() - 60 * 60 * 1000;
         const recentActions = history.filter(t => t > oneHourAgo);
 
-        return recentActions.length < limitPerHour;
+        return recentActions.length < dynamicLimit;
     }
 
     public trackAction(action: 'likes' | 'comments' | 'dms') {
@@ -75,7 +94,10 @@ export class ActivityTracker {
         this.cleanOldEntries(); // FIX: Cleanup old entries before saving to prevent file bloat
 
         if (!this.data[this.accountId]) {
-            this.data[this.accountId] = { likes: [], comments: [], dms: [] };
+            this.data[this.accountId] = { likes: [], comments: [], dms: [], firstActive: Date.now() };
+        }
+        if (!this.data[this.accountId].firstActive) {
+            this.data[this.accountId].firstActive = Date.now();
         }
         if (!this.data[this.accountId][action]) this.data[this.accountId][action] = [];
         this.data[this.accountId][action].push(Date.now());
