@@ -1,5 +1,5 @@
 {
-  "name": "riona-ai-agent",
+  "name": "resumate",
   "version": "1.0.0",
   "main": "src/index.ts",
   "scripts": {
@@ -12,7 +12,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Riona-AI-Agent is an AI-powered automation tool designed to interact with various social media platforms.",
+  "description": "resumate is an AI-powered automation tool designed to interact with various social media platforms.",
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "axios": "^1.7.9",

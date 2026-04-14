@@ -64,7 +64,7 @@ export class EmailService {
             <p><strong>Company:</strong> ${jobCompany}</p>
             <p><strong>Link:</strong> <a href="${jobUrl}">Apply Now</a></p>
             <br />
-            <p><em>Sent by Riona AI Agent</em></p>
+            <p><em>Sent by ResuMate</em></p>
         `;
 
         const mailOptions = {
@@ -82,6 +82,53 @@ export class EmailService {
             logger.error(`Failed to send email alert: ${error}`);
         }
     }
+
+    async sendBatchJobAlert(jobs: { title: string, company: string, url: string, platform: string, score: number }[], toEmail: string) {
+        if (jobs.length === 0) return;
+
+        // Remove the 🔥 emoji which often triggers spam filters
+        const subject = `ResuMate: ${jobs.length} New Job Match${jobs.length > 1 ? 'es' : ''} Found`;
+        let html = `<div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">`;
+        html += `<h2 style="color: #2c3e50;">${jobs.length} New Job${jobs.length > 1 ? 's' : ''} Found</h2>`;
+        
+        let text = `${jobs.length} New Job${jobs.length > 1 ? 's' : ''} Found\n\n`; // Plain text version
+
+        html += `<ul style="list-style-type: none; padding: 0;">`;
+        for (const job of jobs) {
+            html += `
+                <li style="margin-bottom: 20px; padding: 20px; background-color: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <h3 style="margin: 0 0 10px 0; color: #34495e;">${job.title}</h3>
+                    <p style="margin: 0 0 8px 0;"><strong>Company:</strong> ${job.company}</p>
+                    <p style="margin: 0 0 15px 0;"><strong>Platform:</strong> ${job.platform} (AI Score: ${job.score})</p>
+                    <a href="${job.url}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">View & Apply</a>
+                </li>
+            `;
+            text += `Title: ${job.title}\nCompany: ${job.company}\nPlatform: ${job.platform} (Score: ${job.score})\nLink: ${job.url}\n\n`;
+        }
+        
+        html += `</ul>`;
+        html += `<hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;" />`;
+        html += `<p style="font-size: 12px; color: #999; text-align: center;">This is an automated message sent by the ResuMate.<br>If you wish to stop receiving these emails, please update your ResuMate preferences.</p>`;
+        html += `</div>`;
+
+        text += `\n---\nThis is an automated message sent by the ResuMate.\nIf you wish to stop receiving these emails, please update your ResuMate preferences.`;
+
+        const mailOptions = {
+            from: `"ResuMate" <${this.config.from || this.config.user}>`, // Use exact name format
+            to: toEmail,
+            subject: subject,
+            text: text, // Include plain text
+            html: html
+        };
+
+        try {
+            await this.transporter.sendMail(mailOptions);
+            logger.info(`Batch email sent to ${toEmail} with ${jobs.length} jobs.`);
+        } catch (error) {
+            logger.error(`Failed to send batch email alert: ${error}`);
+        }
+    }
+
     setRecipient(email: string) {
         this.config.to = email;
         logger.info(`Email recipient updated to: ${email}`);
@@ -109,7 +156,7 @@ export class EmailService {
                 <li>Once the CAPTCHA is solved and the page redirects to the feed/home, the bot will automatically resume.</li>
             </ol>
             <br />
-            <p><em>Sent by Riona AI Agent</em></p>
+            <p><em>Sent by ResuMate</em></p>
         `;
 
         const mailOptions = {
@@ -148,7 +195,7 @@ export class EmailService {
             <br />
             <p><em>No action is required from you. The bot will automatically attempt to resume after 1 hour.</em></p>
             <br />
-            <p><em>Sent by Riona AI Agent</em></p>
+            <p><em>Sent by ResuMate</em></p>
         `;
 
         const mailOptions = {
@@ -187,7 +234,7 @@ export class EmailService {
             <p><strong>Error:</strong> <pre>${errorMsg}</pre></p>
             <br />
             <p>The bot session for this account has been terminated or paused.</p>
-            <p><em>Sent by Riona AI Agent</em></p>
+            <p><em>Sent by ResuMate</em></p>
         `;
 
         const mailOptions = {
@@ -224,7 +271,7 @@ export class EmailService {
             <br />
             <p>The bot has paused execution for this account to prevent a permanent ban.</p>
             <p><strong>Recommended Action:</strong> Manual login and verification might be required, or simply wait 24-48 hours.</p>
-            <p><em>Sent by Riona AI Agent</em></p>
+            <p><em>Sent by ResuMate</em></p>
         `;
 
         const mailOptions = {

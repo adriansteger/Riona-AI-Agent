@@ -327,6 +327,8 @@ export class JobClient {
 
     private async executeSearchLoop() {
         const locations = Array.isArray(this.config.location) ? this.config.location : [this.config.location];
+        
+        let userMatchedJobs: any[] = [];
 
         for (const location of locations) {
             logger.info(`-- - Searching jobs in: ${location} --- `);
@@ -349,13 +351,21 @@ export class JobClient {
                         logger.warn(`Unknown or unsupported platform: ${platform} `);
                     }
 
-                    await this.processJobs(jobs, platform);
+                    const matched = await this.processJobs(jobs, platform);
+                    if (matched && matched.length > 0) {
+                        userMatchedJobs = userMatchedJobs.concat(matched);
+                    }
 
                 } catch (error) {
                     logger.error(`Error running search for ${platform} in ${location}: ${error} `);
                     await this.close();
                 }
             }
+        }
+
+        if (userMatchedJobs.length > 0) {
+            const toEmail = this.config.email || process.env.EMAIL_USER || "";
+            await this.emailService.sendBatchJobAlert(userMatchedJobs, toEmail);
         }
     }
 
@@ -441,7 +451,7 @@ export class JobClient {
         }
     }
 
-    private async processJobs(allJobs: JobData[], platform: string) {
+    private async processJobs(allJobs: JobData[], platform: string): Promise<any[]> {
         // 0. Deduplicate input list (Self-Dedup)
         const uniqueJobsMap = new Map<string, JobData>();
         for (const j of allJobs) {
@@ -469,6 +479,8 @@ export class JobClient {
         jobs = await this.filterExistingJobs(jobs);
 
         logger.info(`Processing ${jobs.length} new jobs for ${platform}...`);
+        
+        const matchedJobsToReturn: any[] = [];
 
         for (const job of jobs) {
             try {
@@ -493,14 +505,14 @@ export class JobClient {
                 );
 
                 if (analysis.isRelevant) {
-                    logger.info(`Job Match! Score: ${analysis.score}. Sending email.`);
-                    await this.emailService.sendJobAlert(
-                        job.title,
-                        job.company,
-                        job.url,
-                        platform,
-                        this.config.email || process.env.EMAIL_USER || "" // Fallback to sender if no email
-                    );
+                    logger.info(`Job Match! Score: ${analysis.score}. Queuing for batch email.`);
+                    matchedJobsToReturn.push({
+                        title: job.title,
+                        company: job.company,
+                        url: job.url,
+                        platform: platform,
+                        score: analysis.score
+                    });
 
                     // --- ResuMate Integration ---
                     await this.postToResuMate(job, details, platform, analysis.score);
@@ -518,6 +530,8 @@ export class JobClient {
                 logger.error(`Error processing job ${job.title}: ${error} `);
             }
         }
+        
+        return matchedJobsToReturn;
     }
 
     private detailsPage: any;

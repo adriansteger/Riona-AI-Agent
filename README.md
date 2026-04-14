@@ -1,5 +1,5 @@
 
-## Riona AI Agent 🌸
+## ResuMate 🌸
 
 ## Support the Project 🙌
 
@@ -14,7 +14,7 @@ If you'd like to support the development of Instagram-AI-Agent, please consider 
 
 Your support helps keep this project running and growing! 🚀
 
-Riona AI Agent is an AI-powered automation tool designed for **Instagram and Twitter** to automate social media interactions such as posting, liking, and commenting. It leverages advanced AI models to generate engaging content, automate interactions, and manage social media accounts efficiently.
+ResuMate is an AI-powered automation tool designed for **Instagram and Twitter** to automate social media interactions such as posting, liking, and commenting. It leverages advanced AI models to generate engaging content, automate interactions, and manage social media accounts efficiently.
 
 Before using the automation features, you can personalize the agent by training with the following, including:
 https://www.instagram.com/dreamlandofficial_1?igsh=NTZvcHRkNjlhYzhp
@@ -40,8 +40,8 @@ GitHub automation is planned for future development.
 1. **Clone the repository**:
 
    ```sh
-   git clone https://github.com/david-patrick-chuks/riona-ai-agent.git
-   cd riona-ai-agent
+   git clone https://github.com/david-patrick-chuks/resumate.git
+   cd resumate
    ```
 
 2. **Install dependencies**:
@@ -143,7 +143,7 @@ This project is licensed under the MIT License. See the LICENSE file for details
 ## Stargazers
 Thank you to all our supporters!
 
-[![Star History Chart](https://api.star-history.com/svg?repos=David-patrick-chuks/Riona-AI-Agent&type=Date)](https://www.star-history.com/#David-patrick-chuks/Riona-AI-Agent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=David-patrick-chuks/resumate&type=Date)](https://www.star-history.com/#David-patrick-chuks/resumate&Date)
 
 ## 
 
