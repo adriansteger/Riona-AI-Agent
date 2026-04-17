@@ -267,6 +267,17 @@ export class IgClient {
                             this.logger.warn(`Failed to delete lock file ${file}: ${e}`);
                         }
                     }
+
+                    // DRASTIC SELF-HEALING: If lock clears didn't work after 3 attempts, the profile is terminally corrupt.
+                    if (attempt >= 3) {
+                        try {
+                            this.logger.warn("Drastic self-repair: Profile is persistently corrupted or locked. Deleting entire profile directory to start fresh...");
+                            await fs.rm(path.resolve(process.cwd(), this.userDataDir), { recursive: true, force: true });
+                            this.logger.info("Deleted corrupted profile folder. The next launch attempt will recreate it cleanly.");
+                        } catch (e) {
+                            this.logger.warn(`Failed to delete profile dir: ${e}`);
+                        }
+                    }
                 }
 
                 // Increase backoff delay slightly with each attempt

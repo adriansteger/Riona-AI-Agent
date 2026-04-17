@@ -126,7 +126,13 @@ export function setupErrorHandlers(): void {
 
 // ... existing logger ...
 
+const accountLoggersMap = new Map<string, any>(); // generic winston logger type
+
 export const createAccountLogger = (accountId: string) => {
+    if (accountLoggersMap.has(accountId)) {
+        return accountLoggersMap.get(accountId)!;
+    }
+
     // Sanitize accountId for filesystem safety
     const safeId = accountId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const accountLogDir = path.join(logDir, 'accounts', safeId);
@@ -135,7 +141,7 @@ export const createAccountLogger = (accountId: string) => {
         fs.mkdirSync(accountLogDir, { recursive: true });
     }
 
-    return createLogger({
+    const newLogger = createLogger({
         level: "info",
         format: format.combine(
             format.timestamp({ format: customTimestamp }),
@@ -174,6 +180,9 @@ export const createAccountLogger = (accountId: string) => {
             }),
         ],
     });
+
+    accountLoggersMap.set(accountId, newLogger);
+    return newLogger;
 };
 
 export default logger;

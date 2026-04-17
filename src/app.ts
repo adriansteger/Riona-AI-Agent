@@ -282,6 +282,9 @@ const processAccount = async (account: any, emailService?: EmailService) => {
   }
 };
 
+// Global persisted Alert Email Service to prevent handle leaks
+let globalAlertEmailService: EmailService | undefined;
+
 // Define runInstagram
 const runInstagram = async () => {
   logger.info("Starting Multi-Account Instagram Bot...");
@@ -297,9 +300,6 @@ const runInstagram = async () => {
 
   logger.info(`Found ${enabledAccounts.length} enabled Instagram accounts: ${enabledAccounts.map(a => a.id).join(', ')}`);
 
-  // Initialize Global Email Service for Alerts
-  let alertEmailService: EmailService | undefined;
-
   // Check for specific IG_ALERT credentials first, then fallback to generic EMAIL credentials
   const mailUser = process.env.IG_ALERT_EMAIL_USER || process.env.EMAIL_USER;
   const mailPass = process.env.IG_ALERT_EMAIL_PASS || process.env.EMAIL_PASS;
@@ -310,20 +310,23 @@ const runInstagram = async () => {
   const mailService = process.env.IG_ALERT_EMAIL_SERVICE || process.env.EMAIL_SERVICE;
   const mailTo = process.env.IG_ALERT_EMAIL_TO || process.env.EMAIL_ALERTS_TO || mailUser;
 
-  if (mailUser && mailPass) {
-    alertEmailService = new EmailService({
-      host: mailHost,
-      port: parseInt(mailPort),
-      secure: mailSecure === 'true',
-      user: mailUser,
-      pass: mailPass,
-      to: mailTo!,
-      from: mailFrom,
-      service: mailService
-    });
-    logger.info(`Global Email Alert System initialized (Sender: ${mailFrom || mailUser}, Config: ${mailHost || mailService})`);
-  } else {
-    logger.warn("Email alert system skipped (Missing Credentials). CAPTCHA alerts will not be sent.");
+  // Initialize Global Email Service for Alerts ONCE
+  if (!globalAlertEmailService) {
+    if (mailUser && mailPass) {
+      globalAlertEmailService = new EmailService({
+        host: mailHost,
+        port: parseInt(mailPort),
+        secure: mailSecure === 'true',
+        user: mailUser,
+        pass: mailPass,
+        to: mailTo!,
+        from: mailFrom,
+        service: mailService
+      });
+      logger.info(`Global Email Alert System initialized (Sender: ${mailFrom || mailUser}, Config: ${mailHost || mailService})`);
+    } else {
+      logger.warn("Email alert system skipped (Missing Credentials). CAPTCHA alerts will not be sent.");
+    }
   }
 
   // Configurable Concurrency
@@ -334,7 +337,7 @@ const runInstagram = async () => {
   const limit = pLimit(maxConcurrent);
 
   // Create promises for all enabled accounts
-  const promises = enabledAccounts.map(account => limit(() => processAccount(account, alertEmailService)));
+  const promises = enabledAccounts.map(account => limit(() => processAccount(account, globalAlertEmailService)));
 
   // Wait for all to finish
   await Promise.all(promises);
@@ -364,6 +367,10 @@ const runAgents = async () => {
     await new Promise((resolve) => setTimeout(resolve, 30000));
   }
 };
+
+// Global persisted JobBot instances to prevent handle leaks (EMFILE)
+let globalJobEmailService: EmailService | null = null;
+let globalJobClient: JobClient | null = null;
 
 const runJobBot = async () => {
   // Check if Job Bot is enabled in config
@@ -395,26 +402,30 @@ const runJobBot = async () => {
   }
 
   try {
-    const emailService = new EmailService(emailConfig);
+    if (!globalJobClient) {
+      if (!globalJobEmailService) {
+        globalJobEmailService = new EmailService(emailConfig);
+      }
 
-    // Default config (will be overridden by ResuMate API)
-    // Use platforms defined in job_accounts.json (first bot)
-    const botConfig = jobConfig.jobBots?.[0];
-    const platforms = botConfig?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
-    const proxy = botConfig?.proxy;
+      // Default config (will be overridden by ResuMate API)
+      // Use platforms defined in job_accounts.json (first bot)
+      const botConfig = jobConfig.jobBots?.[0];
+      const platforms = botConfig?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
+      const proxy = botConfig?.proxy;
 
-    const defaultJobConfig = {
-      keywords: [],
-      location: 'Remote',
-      platforms: platforms,
-      proxy: proxy
-    };
+      const defaultJobConfig = {
+        keywords: [],
+        location: 'Remote',
+        platforms: platforms,
+        proxy: proxy
+      };
 
-    const client = new JobClient(emailService, defaultJobConfig);
+      globalJobClient = new JobClient(globalJobEmailService, defaultJobConfig);
+      await globalJobClient.init();
+    }
 
-    await client.init();
-    await client.runSearch();
-    // await client.close(); // Keep browser open per user request for persistence
+    await globalJobClient.runSearch();
+    // Keep browser open per user request, because client is now global!
 
   } catch (error) {
     logger.error(`Error in Job Bot: ${error}`);
