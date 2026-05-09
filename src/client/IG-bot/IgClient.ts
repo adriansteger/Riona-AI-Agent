@@ -1832,13 +1832,27 @@ export class IgClient {
                     break;
                 }
 
+                // --- STABILIZATION ---
+                // Ensure page is stable before scraping grid links
+                await delay(1000);
+
                 // 1. Get all visible post links from the grid
-                const postLinks = await this.page.evaluate(() => {
-                    const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
-                    return links.map(a => ({
-                        href: a.getAttribute('href'),
-                    })).filter(l => l.href);
-                });
+                let postLinks = [];
+                try {
+                    postLinks = await this.page.evaluate(() => {
+                        const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
+                        return links.map(a => ({
+                            href: a.getAttribute('href'),
+                        })).filter(l => l.href);
+                    });
+                } catch (err: any) {
+                    if (err.message?.includes('detached') || err.message?.includes('Execution context was destroyed')) {
+                        this.logger.warn("Frame detached or context destroyed during link scraping. Waiting for page stabilization...");
+                        await delay(5000);
+                        continue; // Retry the loop
+                    }
+                    throw err; // Re-throw other errors
+                }
 
                 if (postLinks.length === 0) {
                     this.logger.warn("No post links found in grid. Scrolling...");
