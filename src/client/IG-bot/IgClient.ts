@@ -117,20 +117,15 @@ export class IgClient {
         const launchArgs = [
             `--window-size=${width},${height}`,
             `--window-position=${left},${top}`,
-            // User requested background/minimized launch
-            // User requested maximized window for better loading reliability
-            // '--start-maximized', // DISABLED: User wants foreground but not full screen
-            // Stability flags (Optimized for Windows)
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
             '--no-first-run',
-            '--mute-audio', // Good practice
-            // Critical stability flags for avoiding TargetCloseError with Stealth Plugin
+            '--mute-audio',
             '--disable-ipc-flooding-protection',
-            '--disable-features=IsolateOrigins,site-per-process,CalculateNativeWinOcclusion', // Optimized for background
+            // Disable occlusion to prevent throttling when window is covered, but avoid site-per-process disablement which causes crashes
+            '--disable-features=CalculateNativeWinOcclusion', 
             '--disable-renderer-backgrounding',
-            // Prevent Chrome from pausing when minimized/backgrounded
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--enable-features=NetworkService,NetworkServiceInProcess'
@@ -177,13 +172,20 @@ export class IgClient {
             // Ensure directory exists
             await fs.mkdir(absoluteUserDataDir, { recursive: true }).catch(() => { });
 
-            // PROACTIVE CLEANUP: Kill any lingering Chrome processes for this profile BEFORE launching
-            // Only if NOT connected (already checked above, but good for safety)
+            // PROACTIVE CLEANUP: Kill processes and clear stale locks BEFORE first launch attempt
             if (!this.isConnected()) {
                 try {
-                    this.logger.info("Proactively cleaning up any existing Chrome processes for this profile...");
+                    this.logger.info("Proactively cleaning up any existing Chrome processes and locks for this profile...");
                     await killChromeProcessByProfile(this.userDataDir);
                     await delay(2000); // Give it a moment to release locks
+
+                    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+                    for (const file of lockFiles) {
+                        try {
+                            const lockPath = path.join(absoluteUserDataDir, file);
+                            await fs.unlink(lockPath).catch(() => { });
+                        } catch (e) { /* ignore */ }
+                    }
                 } catch (e: any) {
                     this.logger.warn(`Proactive cleanup failed (non-critical): ${e.message}`);
                 }
@@ -193,33 +195,44 @@ export class IgClient {
         this.logger.info(`Launching browser with options: ${JSON.stringify({ ...launchOptions, args: launchOptions.args.map((a: string) => a.startsWith('--proxy-server') ? '--proxy-server=REDACTED' : a) }, null, 2)}`);
 
         let attempt = 0;
-        const maxAttempts = 5;
+        const maxAttempts = 3; // Reduced to 3 to avoid long loops in case of critical failure
         while (attempt < maxAttempts) {
             try {
                 this.browser = await puppeteerExtra.launch(launchOptions);
-                // Move newPage inside the try block to catch "Requesting main frame too early" errors
-                this.page = await this.browser.newPage();
+                
+                // CRITICAL: Give the browser and stealth plugin a moment to stabilize
+                await delay(2000);
 
-                // FORCE RANDOM POSITION: Use CDP to move window, bypassing Window Manager defaults
+                // REUSE INITIAL PAGE: HEADLESS=FALSE often opens a default blank tab. 
+                // Using newPage() creates a SECOND tab, which can overload the frame manager during startup.
+                const pages = await this.browser.pages();
+                this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
+
+                // Small delay to ensure the page object is fully hydrated
+                await delay(500);
+
+                // FORCE RANDOM POSITION: Use CDP to move window
                 try {
                     const session = await this.page.createCDPSession();
-                    const { windowId } = await session.send("Browser.getWindowForTarget") as any;
-                    const randomX = Math.floor(Math.random() * 400); // 0-400px offset
-                    const randomY = Math.floor(Math.random() * 300); // 0-300px offset
-
-                    await session.send("Browser.setWindowBounds", {
-                        windowId,
-                        bounds: {
-                            left: randomX,
-                            top: randomY,
-                            width: 1280,
-                            height: 800,
-                            windowState: "normal"
-                        }
-                    });
-                    this.logger.info(`Moved window to position: ${randomX},${randomY}`);
+                    const targetRes = await session.send("Browser.getWindowForTarget") as any;
+                    const windowId = targetRes.windowId;
+                    
+                    if (windowId) {
+                        await session.send("Browser.setWindowBounds", {
+                            windowId,
+                            bounds: {
+                                left: Math.floor(Math.random() * 400),
+                                top: Math.floor(Math.random() * 300),
+                                width: 1280,
+                                height: 800,
+                                windowState: "normal"
+                            }
+                        });
+                        this.logger.info(`Moved window using CDP.`);
+                    }
+                    await session.detach(); // Detach to avoid lingering session issues
                 } catch (moveErr) {
-                    this.logger.warn(`Failed to move window (non-critical): ${moveErr}`);
+                    this.logger.warn(`Non-critical: CDP window move failed, using fallback or default position.`);
                 }
 
                 // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
@@ -1801,49 +1814,83 @@ export class IgClient {
             // Selector for the first post in the grid (Top Posts or Most Recent)
             // Typically: _aagw is the image container class. 
             // Better to select by anchor tag in the grid.
-            // Start with robust selectors for the grid
-            // 1. Generic links to /p/ (posts) inside Main (Best)
-            // 2. Any link to /p/ (Fallback)
-            const postSelectors = [
-                'main a[href^="/p/"]',
-                'a[href^="/p/"]',
-                'div._aagw', // Legacy container
-                'article a[role="link"]'
-            ];
+            // --- GRID SCRAPING STRATEGY ---
+            // Instead of just clicking the first post and using "Next" navigation,
+            // we scrape the grid for links to check them BEFORE opening.
 
-            let firstPost = null;
-            for (const selector of postSelectors) {
-                try {
-                    await this.page.waitForSelector(selector, { timeout: 4000 });
-                    firstPost = await this.page.$(selector);
-                    if (firstPost) {
-                        this.logger.info(`Found post using selector: ${selector}`);
-                        break;
-                    }
-                } catch (e) { }
-            }
+            let actionsDone = 0;
+            let postsChecked = 0;
+            const targetActions = 10;
+            const maxPostsToInspect = 30; // Safety limit to avoid infinite scrolling
 
-            if (!firstPost) {
-                const currentUrl = this.page.url();
-                this.logger.error(`No posts found on ${currentUrl} using selectors: ${postSelectors.join(', ')}`);
-                await this.page.screenshot({ path: `logs/debug_hashtag_${tag}_error.png` });
-                const body = await this.page.evaluate(() => document.body.innerHTML.substring(0, 1000));
-                this.logger.error(`Debug HTML: ${body}`);
-                throw new Error("No posts found.");
-            }
+            this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
 
-            this.logger.info(`Opened #${tag} page. Clicking first post...`);
-            await firstPost.click();
-            await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
-
-            let postsProcessed = 0;
-            const maxPosts = 10; // Limit for this session
-
-            while (postsProcessed < maxPosts) {
+            while (actionsDone < targetActions && postsChecked < maxPostsToInspect) {
                 // Check exit flag
                 if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
                     this.logger.info('Exit requested. Stopping hashtag loop.');
                     break;
+                }
+
+                // 1. Get all visible post links from the grid
+                const postLinks = await this.page.evaluate(() => {
+                    const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
+                    return links.map(a => ({
+                        href: a.getAttribute('href'),
+                    })).filter(l => l.href);
+                });
+
+                if (postLinks.length === 0) {
+                    this.logger.warn("No post links found in grid. Scrolling...");
+                    await this.page.evaluate(() => window.scrollBy(0, 500));
+                    await delay(2000);
+                    postsChecked += 5; // Artificial increment to prevent infinite loop if grid is empty
+                    continue;
+                }
+
+                // Pick the post at current index (postsChecked)
+                // If we ran out of links in the current view, scroll down
+                if (postsChecked >= postLinks.length) {
+                    this.logger.info("Reached end of visible links. Scrolling for more...");
+                    await this.page.evaluate(() => window.scrollBy(0, 800));
+                    await delay(3000);
+                    // Re-scan links after scroll
+                    continue;
+                }
+
+                const postData = postLinks[postsChecked];
+                const postUrl = postData.href!;
+                
+                // --- DB CHECK BEFORE OPENING ---
+                const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+
+                if (isAlreadyLikedDB) {
+                    this.logger.info(`[GRID SKIP] Post ${postsChecked + 1} (${postUrl}) already liked in DB. Not opening.`);
+                    postsChecked++;
+                    continue;
+                }
+
+                // --- OPEN POST ---
+                this.logger.info(`[GRID] Opening unliked post ${postsChecked + 1}: ${postUrl}`);
+                
+                // Find the specific element to click. 
+                // We re-query to ensure we have a fresh handle after scrolls.
+                const postElement = await this.page.$(`a[href="${postUrl}"]`);
+                if (!postElement) {
+                    this.logger.warn(`Could not find element for ${postUrl} in grid. Skipping.`);
+                    postsChecked++;
+                    continue;
+                }
+
+                await postElement.click();
+                await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
+
+                // Connectivity check for modal
+                const modalVisible = await this.page.evaluate(() => !!document.querySelector('div[role="dialog"]'));
+                if (!modalVisible) {
+                    this.logger.warn("Modal did not open. Trying fallback click...");
+                    await postElement.evaluate((el: any) => el.click());
+                    await delay(3000);
                 }
 
                 // --- LIKING LOGIC (Modal) ---
@@ -1862,17 +1909,14 @@ export class IgClient {
                         const postUrl = await this.page.url();
                         const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
 
-                        // Simulating a random skip to add interaction noise
                         const shouldSkip = Math.random() < 0.2; // 20% chance to skip
 
-                        if (isAlreadyLikedDB) {
-                            this.logger.info(`Post ${postsProcessed + 1} already liked (found in DB). Skipping.`);
-                            // Do NOT track action
-                        } else if (shouldSkip) {
-                            this.logger.info(`Simulating human behavior: randomly skipping post ${postsProcessed + 1} without liking.`);
+                        if (shouldSkip) {
+                            this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
                             await delay(getHumanLikeDelay(2000, 1000));
+                            // action count incremented at end of loop if not already liked
                         } else if (await this.page.$(strictUnlikeSelector)) {
-                            this.logger.info(`Post ${postsProcessed + 1} already liked (UI).`);
+                            this.logger.info(`Post ${postsChecked + 1} already liked (UI).`);
                             // Also save to DB for future runs to avoid opening
                             await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
                         } else {
@@ -1886,7 +1930,7 @@ export class IgClient {
                             if (!likeButton) {
                                 // Double check generic unlike before expensive scan
                                 if (await this.page.$('svg[aria-label="Unlike"]')) {
-                                    this.logger.info(`Post ${postsProcessed + 1} already liked (Fallback).`);
+                                    this.logger.info(`Post ${postsChecked + 1} already liked (Fallback).`);
                                 } else {
                                     this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
                                     const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
@@ -1901,7 +1945,7 @@ export class IgClient {
                                     }
 
                                     if (!likeButton) {
-                                        this.logger.info(`Like button not found for post ${postsProcessed + 1}.`);
+                                        this.logger.info(`Like button not found for post ${postsChecked + 1}.`);
                                     }
                                 }
                             }
@@ -1909,7 +1953,7 @@ export class IgClient {
                             if (likeButton) {
                                 const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
                                 if (isConnected) {
-                                    this.logger.info(`Liking post ${postsProcessed + 1} in #${tag}...`);
+                                    this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
                                     await likeButton.click();
                                     await delay(getHumanLikeDelay(1500, 800));
 
@@ -1954,7 +1998,7 @@ export class IgClient {
                                 // It's likely a comment!
                                 const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
                                 if (isConnected) {
-                                    this.logger.info(`Liking a comment on post ${postsProcessed + 1}...`);
+                                    this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
                                     await btn.click();
                                     await delay(getHumanLikeDelay(1500, 800));
                                     likedCount++;
@@ -1971,86 +2015,63 @@ export class IgClient {
                     }
                 }
 
-                // --- NEXT POST NAVIGATION ---
-                postsProcessed++;
-                if (postsProcessed >= maxPosts) break;
-
+                // --- CLOSE MODAL ---
                 try {
-                    // "Next" arrow in modal. Often svg[aria-label="Next"] or generic button
-                    const nextArrowSelector = 'svg[aria-label="Next"]';
-                    const nextButton = await this.page.$(`button ${nextArrowSelector}, a ${nextArrowSelector}, ${nextArrowSelector}`); // Flexible search
-                    // Usually the SVG is inside a button or anchor
-                    // More robust: search by aria-label "Next" on SVG
-
-                    // We need to click the PARENT element usually (the button), not just the SVG
-                    // --- NAVIGATION TO NEXT POST ---
-                    try {
-                        // Robustly find the next arrow using JS filtering for better partial matching
-                        const nextElement = await this.page.evaluateHandle(() => {
-                            // Focus on buttons/links inside the dialog (modal) if possible, or global if not
-                            const container = document.querySelector('div[role="dialog"]') || document;
-                            const candidates = Array.from(container.querySelectorAll('button, a, div[role="button"]'));
-
-                            // Find button with "next" or "chevron" in aria-label (on self or child SVG)
-                            // STARTING FROM THE END because Next button is usually on the right/bottom
-                            for (let i = candidates.length - 1; i >= 0; i--) {
-                                const el = candidates[i];
-                                const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                                const svgLabel = (el.querySelector('svg')?.getAttribute('aria-label') || '').toLowerCase();
-
-                                if (label.includes('next') || label.includes('chevron') ||
-                                    svgLabel.includes('next') || svgLabel.includes('chevron')) {
-                                    // Verify visibility
-                                    const rect = el.getBoundingClientRect();
-                                    if (rect.width > 0 && rect.height > 0) return el;
-                                }
-                            }
-                            return null;
-                        }).catch((e: Error) => {
-                            this.logger.warn(`Navigation selector failed (frame detached?): ${e.message}`);
-                            return null;
+                    const closeButton = await this.page.evaluateHandle(() => {
+                        const container = document.querySelector('div[role="dialog"]') || document;
+                        
+                        // 1. Search by SVG aria-label (Internationalized)
+                        const svgs = Array.from(container.querySelectorAll('svg'));
+                        const closeWords = ['close', 'schließen', 'fermer', 'chiudi', 'cerrar', 'dismiss', 'x'];
+                        
+                        const closeSvg = svgs.find(svg => {
+                            const label = (svg.getAttribute('aria-label') || '').toLowerCase();
+                            return closeWords.some(word => label.includes(word));
                         });
+                        if (closeSvg) return closeSvg.closest('button') || closeSvg.closest('div[role="button"]') || closeSvg;
 
-                        if (nextElement && nextElement.asElement()) {
-                            const nextElementHandle = nextElement.asElement();
-                            if (nextElementHandle) {
-                                this.logger.info("Navigating to next post...");
-                                // Click and wait, catching any detachment errors during the transition
-                                try {
-                                    await Promise.all([
-                                        (nextElementHandle as puppeteer.ElementHandle<Element>).click(),
-                                        delay(3000 + Math.random() * 2000)
-                                    ]);
-                                } catch (clickErr) {
-                                    this.logger.warn("Click failed, trying ArrowRight key fallback...");
-                                    await this.page.keyboard.press('ArrowRight');
-                                    await delay(3000);
-                                }
-                            } else {
-                                this.logger.warn("Next element handle is null. Stopping.");
-                                break;
-                            }
-                        } else {
-                            // FALLBACK: Try ArrowRight key even if button not found (it might be there but hidden/unlabeled)
-                            this.logger.info("Next arrow not found. Trying ArrowRight key fallback...");
-                            await this.page.keyboard.press('ArrowRight');
-                            await delay(3000);
+                        // 2. Search by Button aria-label
+                        const buttons = Array.from(container.querySelectorAll('button, div[role="button"], a'));
+                        const labeledBtn = buttons.find(b => {
+                            const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                            return closeWords.some(word => label.includes(word));
+                        });
+                        if (labeledBtn) return labeledBtn;
+
+                        // 3. Fallback: find any button in the top-right quadrant of the dialog
+                        if (container instanceof HTMLElement) {
+                            const rect = container.getBoundingClientRect();
+                            const topThird = rect.top + (rect.height / 3);
+                            const rightThird = rect.right - (rect.width / 3);
+                            return buttons.find(b => {
+                                const bRect = b.getBoundingClientRect();
+                                return bRect.top < topThird && bRect.right > rightThird;
+                            });
                         }
 
-                    } catch (e: any) {
-                        if (e.message && e.message.includes('detached')) {
-                            this.logger.warn(`Frame detached during navigation (likely page reload). Stopping session safely.`);
-                        } else {
-                            this.logger.warn(`Error navigating to next post: ${e.message}`);
-                        }
-                        if (this.emailService && !e.message?.includes('detached')) {
-                            this.emailService.sendErrorAlert(this.username, e.message || "Unknown Start", "Hashtag Navigation Failed").catch(() => { });
-                        }
-                        break;
+                        return null;
+                    });
+                    const closeBtnHandle = closeButton.asElement();
+                    if (closeBtnHandle) {
+                        this.logger.info("Closing modal via button click...");
+                        await (closeBtnHandle as any).click().catch(() => {});
+                        await delay(1500);
+                    } else {
+                        this.logger.warn("Close button not found. Using 'Escape' key.");
+                        await this.page.keyboard.press('Escape');
+                        await delay(1500);
                     }
                 } catch (e) {
-                    /* ignoring outer try error */
+                    this.logger.warn("Error closing modal: " + e);
                 }
+
+                // Increment actions only if we actually liked something (tracked in activityTracker) 
+                // OR if we randomly skipped.
+                // We'll increment actionsDone for every loop that doesn't continue early (skips already-liked).
+                if (!isAlreadyLikedDB) {
+                    actionsDone++;
+                }
+                postsChecked++;
             }
 
         } catch (e) {
@@ -2201,11 +2222,24 @@ export class IgClient {
 
                 const isAlreadyLikedDB = postUrl ? await LikedPost.exists({ username: this.username, postUrl }) : false;
 
+                if (isAlreadyLikedDB || ariaLabel === "Unlike") {
+                    this.logger.info(`Skipping post ${postIndex}: already liked (${isAlreadyLikedDB ? 'DB' : 'UI'}).`);
+                    
+                    // Update DB if found in UI but not in DB
+                    if (!isAlreadyLikedDB && postUrl) {
+                        await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
+                    }
+
+                    // Move to next post immediately
+                    postIndex++;
+                    await page.evaluate(() => { window.scrollBy(0, window.innerHeight); });
+                    await delay(getHumanLikeDelay(2000, 1000));
+                    continue;
+                }
+
                 // --- LIKING LOGIC ---
                 if (behavior.enableLikes !== false) {
-                    if (isAlreadyLikedDB) {
-                        console.log(`Skipping like for post ${postIndex}: already liked (found in DB).`);
-                    } else if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
+                    if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
                         console.log(`Skipping like: Hourly limit reached (${activityTracker.getRecentCount('likes')}/${maxLikesPerHour}).`);
                     } else if (ariaLabel === "Like" && likeButton) {
                         console.log(`Liking post ${postIndex}...`);
@@ -2238,12 +2272,6 @@ export class IgClient {
                             }
                         } catch (e) {
                             console.warn(`Error interacting with like button for post ${postIndex}:`, e);
-                        }
-                    } else if (ariaLabel === "Unlike") {
-                        console.log(`Post ${postIndex} is already liked.`);
-                        // Also save to DB for future runs
-                        if (postUrl) {
-                            await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
                         }
                     } else {
                         console.log(`Like button not found for post ${postIndex}.`);

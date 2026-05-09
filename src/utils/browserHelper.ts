@@ -22,7 +22,8 @@ export const killChromeProcessByProfile = async (userDataDir: string): Promise<v
             // wmic process where "name='chrome.exe' and commandline like '%user-data-dir=%<folder>%'" delete
             // We use the full absolute path to be safe, but escape backslashes for WQL
             const escapedPath = absolutePath.replace(/\\/g, '\\\\');
-            command = `wmic process where "name='chrome.exe' and commandline like '%user-data-dir=${escapedPath}%'" delete`;
+            // Use PowerShell with CimInstance filtering for reliability on Windows 10/11
+            command = `powershell -Command "Get-CimInstance Win32_Process -Filter \\"Name = 'chrome.exe' AND CommandLine LIKE '%user-data-dir=${escapedPath}%'\\" | Invoke-CimMethod -MethodName Terminate"`;
         } else if (platform === 'linux') {
             // pkill for Linux (Raspbian) - matches against full command line with -f
             // We look for any process with the profile folder in its arguments
