@@ -2071,11 +2071,13 @@ export class IgClient {
                     if (closeBtnHandle) {
                         this.logger.info("Closing modal via button click...");
                         await (closeBtnHandle as any).click().catch(() => {});
-                        await delay(1500);
+                        await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
+                        await delay(1000);
                     } else {
                         this.logger.warn("Close button not found. Using 'Escape' key.");
                         await this.page.keyboard.press('Escape');
-                        await delay(1500);
+                        await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
+                        await delay(1000);
                     }
                 } catch (e) {
                     this.logger.warn("Error closing modal: " + e);
