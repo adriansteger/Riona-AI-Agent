@@ -141,10 +141,31 @@ const processAccount = async (account: any, emailService?: EmailService) => {
       // Find remaining wait
       const remainingMinutes = Math.ceil((nextActiveTime - Date.now()) / 60000);
       accountLogger.info(`Account is resting. Waiting ~${remainingMinutes} minutes before next active cycle.`);
+
+      // Critical: Ensure session is closed during rest to save memory
+      const existingClient = activeSessions.get(account.id);
+      if (existingClient) {
+        await existingClient.close();
+        activeSessions.delete(account.id);
+        accountLogger.info("Closed persistent session for rest cycle.");
+      }
       return;
     }
 
     const activityTracker = new ActivityTracker(trackerId);
+
+    // --- LIKES PER SESSION RANDOMIZATION ---
+    let sessionLikesTarget = 10;
+    if (limits.likesPerSession) {
+      if (typeof limits.likesPerSession === 'string' && limits.likesPerSession.includes('-')) {
+        const [min, max] = limits.likesPerSession.split('-').map(Number);
+        sessionLikesTarget = Math.floor(Math.random() * (max - min + 1)) + min;
+      } else {
+        sessionLikesTarget = Number(limits.likesPerSession);
+      }
+    }
+    const sessionLimits = { ...limits, likesPerSession: sessionLikesTarget };
+    accountLogger.info(`Session interaction target: ${sessionLikesTarget} actions.`);
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
     const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
@@ -227,41 +248,21 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 
       if (useHashtags) {
         accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-        await igClient.interactWithHashtags(hashtags, { behavior, limits });
+        await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
       } else {
         accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-        await igClient.interactWithPosts({ behavior, limits });
+        await igClient.interactWithPosts({ behavior, limits: sessionLimits });
       }
     } catch (err) {
       throw err; // Re-throw to be caught by outer catch for logging
     } finally {
-      // SMART CLOSE: Only close if limits are now reached
-      const nextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
-      const nextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-
-      let limitsReachedNow = false;
-      if (behavior.enableLikes !== false && nextLike > 0) {
-        if (behavior.enableComments === false || nextComment > 0) limitsReachedNow = true;
-      } else if (behavior.enableComments !== false && nextComment > 0) {
-        if (behavior.enableLikes === false || nextLike > 0) limitsReachedNow = true;
-      }
-
-      const maxSessions = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5');
-      // DEBUG: Log the decision factors
-      accountLogger.info(`[SESSION DEBUG] LimitsReached=${limitsReachedNow}, ActiveSessions=${activeSessions.size}, MaxSessions=${maxSessions}`);
-
-      const shouldClose = limitsReachedNow && activeSessions.size >= maxSessions;
-
-      if (shouldClose) {
-        accountLogger.info(`[SESSION DEBUG] Decision: CLOSE. (Limits Reached & Slots Full: ${activeSessions.size} >= ${maxSessions})`);
-        await igClient.close();
-        activeSessions.delete(account.id);
-      } else {
-        if (limitsReachedNow) {
-          accountLogger.info(`[SESSION DEBUG] Decision: KEEP OPEN. (Limits Reached but Slots Available: ${activeSessions.size} < ${maxSessions})`);
-        } else {
-          accountLogger.info("[SESSION DEBUG] Decision: KEEP OPEN. (Limits Not Reached)");
-        }
+      // ALWAYS CLOSE after session finishes to save RAM, as rest periods are typically long (45m+)
+      // This satisfies the user's request: "when the account is resting the associated browser window can be closed"
+      const existingClient = activeSessions.get(account.id);
+      if (existingClient) {
+          accountLogger.info(`Closing session for ${account.id} before rest period.`);
+          await existingClient.close();
+          activeSessions.delete(account.id);
       }
 
       // Update the Rest Cycle

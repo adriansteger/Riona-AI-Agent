@@ -352,7 +352,7 @@ export class IgClient {
             // With persistent profile, cookies are auto-loaded. Just check login state.
             // 3. Navigate to Instagram (Robust Retry)
             try {
-                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "networkidle2" });
+                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
             } catch (navErr) {
                 this.logger.error(`Critical: Failed to navigate to Instagram after retries: ${navErr}`);
                 if (this.browser) await this.browser.close();
@@ -1246,7 +1246,7 @@ export class IgClient {
             this.page.on('console', consoleHandler);
 
             this.logger.info("Checking for DM Requests...");
-            await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+            await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "domcontentloaded" });
             await delay(3000);
 
             // DEBUG: Dump Page Structure to identify selectors
@@ -1388,7 +1388,7 @@ export class IgClient {
                     this.logger.warn(`Could not find Accept button for request ${i + 1}.`);
                 }
 
-                await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+                await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "domcontentloaded" });
                 await delay(3000);
             }
         } catch (e) {
@@ -1775,7 +1775,7 @@ export class IgClient {
 
     async interactWithHashtags(hashtags: string[], options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; enableCommentLikes?: boolean; };
-        limits?: { likesPerHour?: number; commentsPerHour?: number; }
+        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
     } = {}) {
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: true }, limits } = options;
@@ -1819,13 +1819,14 @@ export class IgClient {
             // we scrape the grid for links to check them BEFORE opening.
 
             let actionsDone = 0;
+            const targetActions = limits?.likesPerSession || 10;
+            const maxPostsToInspect = targetActions * 4; // Safety limit to avoid infinite scrolling
             let postsChecked = 0;
-            const targetActions = 10;
-            const maxPostsToInspect = 30; // Safety limit to avoid infinite scrolling
 
             this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
 
             while (actionsDone < targetActions && postsChecked < maxPostsToInspect) {
+                let interactionPerformed = false;
                 // Check exit flag
                 if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
                     this.logger.info('Exit requested. Stopping hashtag loop.');
@@ -1928,7 +1929,7 @@ export class IgClient {
                         if (shouldSkip) {
                             this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
                             await delay(getHumanLikeDelay(2000, 1000));
-                            // action count incremented at end of loop if not already liked
+                            interactionPerformed = true; // Random skip counts as a simulated action
                         } else if (await this.page.$(strictUnlikeSelector)) {
                             this.logger.info(`Post ${postsChecked + 1} already liked (UI).`);
                             // Also save to DB for future runs to avoid opening
@@ -1975,6 +1976,7 @@ export class IgClient {
                                     await this.checkActionBlock("Hashtag Like Action");
 
                                     activityTracker.trackAction('likes');
+                                    interactionPerformed = true;
 
                                     // Save to DB
                                     await LikedPost.updateOne(
@@ -2079,10 +2081,8 @@ export class IgClient {
                     this.logger.warn("Error closing modal: " + e);
                 }
 
-                // Increment actions only if we actually liked something (tracked in activityTracker) 
-                // OR if we randomly skipped.
-                // We'll increment actionsDone for every loop that doesn't continue early (skips already-liked).
-                if (!isAlreadyLikedDB) {
+                // Increment actions only if we actually liked something OR if we randomly skipped.
+                if (interactionPerformed) {
                     actionsDone++;
                 }
                 postsChecked++;
@@ -2125,7 +2125,7 @@ export class IgClient {
 
     async interactWithPosts(options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
-        limits?: { likesPerHour?: number; commentsPerHour?: number; }
+        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
     } = {}) {
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true }, limits } = options;
@@ -2133,12 +2133,13 @@ export class IgClient {
         // Define limits (default to safe values if not provided)
         const maxLikesPerHour = limits?.likesPerHour || 10;
         const maxCommentsPerHour = limits?.commentsPerHour || 5;
+        const targetActions = limits?.likesPerSession || 10;
 
         // Initialize Activity Tracker
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
 
-        this.logger.info(`Starting interaction session. Hourly Limits: Likes=${maxLikesPerHour}, Comments=${maxCommentsPerHour}`);
+        this.logger.info(`Starting interaction session. Hourly Limits: Likes=${maxLikesPerHour}, Comments=${maxCommentsPerHour}. Session Target=${targetActions}.`);
 
         const page = this.page;
 
@@ -2183,9 +2184,10 @@ export class IgClient {
         }
 
         let postIndex = 1; // Start with the first post
+        let actionsDone = 0;
         const maxPosts = 20; // Limit to prevent infinite scrolling
 
-        while (postIndex <= maxPosts) {
+        while (postIndex <= maxPosts && actionsDone < targetActions) {
             // Check for exit flag
             if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
                 console.log('Exit from interactions requested. Stopping loop.');
@@ -2272,6 +2274,7 @@ export class IgClient {
 
                                 console.log(`Post ${postIndex} liked.`);
                                 activityTracker.trackAction('likes');
+                                actionsDone++;
 
                                 // Save to DB
                                 if (postUrl) {
