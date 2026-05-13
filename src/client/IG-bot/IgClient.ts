@@ -1822,6 +1822,7 @@ export class IgClient {
             const targetActions = limits?.likesPerSession || 10;
             const maxPostsToInspect = targetActions * 4; // Safety limit to avoid infinite scrolling
             let postsChecked = 0;
+            let stabilizationRetries = 0; // NEW: Loop protection
 
             this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
 
@@ -1848,11 +1849,35 @@ export class IgClient {
                     });
                 } catch (err: any) {
                     if (err.message?.includes('detached') || err.message?.includes('Execution context was destroyed')) {
-                        this.logger.warn("Frame detached or context destroyed during link scraping. Waiting for page stabilization...");
+                        stabilizationRetries++;
+                        this.logger.warn(`Frame detached or context destroyed during link scraping (Attempt ${stabilizationRetries}/5). Waiting for page stabilization...`);
+                        
+                        if (stabilizationRetries === 3) {
+                            this.logger.error("Persistent stabilization errors. Attempting page refresh...");
+                            await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                            await delay(5000);
+                        }
+                        
+                        if (stabilizationRetries >= 5) {
+                            this.logger.error("Failed to stabilize after 5 attempts and a refresh. Skipping hashtag to avoid infinite loop.");
+                            break; 
+                        }
+
                         await delay(5000);
                         continue; // Retry the loop
                     }
                     throw err; // Re-throw other errors
+                }
+
+                // Success - reset retries
+                stabilizationRetries = 0;
+
+                // --- URL VALIDITY CHECK ---
+                // Ensure we are still on the hashtag page and haven't been redirected (e.g. to login)
+                const currentUrl = this.page.url();
+                if (!currentUrl.includes('/explore/tags/')) {
+                    this.logger.warn(`Bot navigated away from hashtag page to: ${currentUrl}. Breaking loop.`);
+                    break;
                 }
 
                 if (postLinks.length === 0) {
