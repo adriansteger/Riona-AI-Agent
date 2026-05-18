@@ -408,7 +408,7 @@ const runJobBot = async () => {
         globalJobEmailService = new EmailService(emailConfig);
       }
 
-      // Default config (will be overridden by ResuMate API)
+      // Default config (will be overridden by Instagram AI Agent API)
       // Use platforms defined in job_accounts.json (first bot)
       const botConfig = jobConfig.jobBots?.[0];
       const platforms = botConfig?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];

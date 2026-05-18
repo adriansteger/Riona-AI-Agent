@@ -327,7 +327,7 @@ export class JobClient {
 
     private async executeSearchLoop() {
         const locations = Array.isArray(this.config.location) ? this.config.location : [this.config.location];
-        
+
         let userMatchedJobs: any[] = [];
 
         for (const location of locations) {
@@ -479,7 +479,7 @@ export class JobClient {
         jobs = await this.filterExistingJobs(jobs);
 
         logger.info(`Processing ${jobs.length} new jobs for ${platform}...`);
-        
+
         const matchedJobsToReturn: any[] = [];
 
         for (const job of jobs) {
@@ -530,7 +530,7 @@ export class JobClient {
                 logger.error(`Error processing job ${job.title}: ${error} `);
             }
         }
-        
+
         return matchedJobsToReturn;
     }
 

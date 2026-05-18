@@ -64,7 +64,7 @@ export class EmailService {
             <p><strong>Company:</strong> ${jobCompany}</p>
             <p><strong>Link:</strong> <a href="${jobUrl}">Apply Now</a></p>
             <br />
-            <p><em>Sent by ResuMate</em></p>
+            <p><em>Sent by Instagram AI Agent</em></p>
         `;
 
         const mailOptions = {
@@ -87,10 +87,10 @@ export class EmailService {
         if (jobs.length === 0) return;
 
         // Remove the 🔥 emoji which often triggers spam filters
-        const subject = `ResuMate: ${jobs.length} New Job Match${jobs.length > 1 ? 'es' : ''} Found`;
+        const subject = `Instagram AI Agent: ${jobs.length} New Job Match${jobs.length > 1 ? 'es' : ''} Found`;
         let html = `<div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">`;
         html += `<h2 style="color: #2c3e50;">${jobs.length} New Job${jobs.length > 1 ? 's' : ''} Found</h2>`;
-        
+
         let text = `${jobs.length} New Job${jobs.length > 1 ? 's' : ''} Found\n\n`; // Plain text version
 
         html += `<ul style="list-style-type: none; padding: 0;">`;
@@ -105,16 +105,16 @@ export class EmailService {
             `;
             text += `Title: ${job.title}\nCompany: ${job.company}\nPlatform: ${job.platform} (Score: ${job.score})\nLink: ${job.url}\n\n`;
         }
-        
+
         html += `</ul>`;
         html += `<hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;" />`;
-        html += `<p style="font-size: 12px; color: #999; text-align: center;">This is an automated message sent by the ResuMate.<br>If you wish to stop receiving these emails, please update your ResuMate preferences.</p>`;
+        html += `<p style="font-size: 12px; color: #999; text-align: center;">This is an automated message sent by the Instagram AI Agent.<br>If you wish to stop receiving these emails, please update your Instagram AI Agent preferences.</p>`;
         html += `</div>`;
 
-        text += `\n---\nThis is an automated message sent by the ResuMate.\nIf you wish to stop receiving these emails, please update your ResuMate preferences.`;
+        text += `\n---\nThis is an automated message sent by the Instagram AI Agent.\nIf you wish to stop receiving these emails, please update your Instagram AI Agent preferences.`;
 
         const mailOptions = {
-            from: `"ResuMate" <${this.config.from || this.config.user}>`, // Use exact name format
+            from: `"Instagram AI Agent" <${this.config.from || this.config.user}>`, // Use exact name format
             to: toEmail,
             subject: subject,
             text: text, // Include plain text
@@ -156,7 +156,7 @@ export class EmailService {
                 <li>Once the CAPTCHA is solved and the page redirects to the feed/home, the bot will automatically resume.</li>
             </ol>
             <br />
-            <p><em>Sent by ResuMate</em></p>
+            <p><em>Sent by Instagram AI Agent</em></p>
         `;
 
         const mailOptions = {
@@ -195,7 +195,7 @@ export class EmailService {
             <br />
             <p><em>No action is required from you. The bot will automatically attempt to resume after 1 hour.</em></p>
             <br />
-            <p><em>Sent by ResuMate</em></p>
+            <p><em>Sent by Instagram AI Agent</em></p>
         `;
 
         const mailOptions = {
@@ -234,7 +234,7 @@ export class EmailService {
             <p><strong>Error:</strong> <pre>${errorMsg}</pre></p>
             <br />
             <p>The bot session for this account has been terminated or paused.</p>
-            <p><em>Sent by ResuMate</em></p>
+            <p><em>Sent by Instagram AI Agent</em></p>
         `;
 
         const mailOptions = {
@@ -271,7 +271,7 @@ export class EmailService {
             <br />
             <p>The bot has paused execution for this account to prevent a permanent ban.</p>
             <p><strong>Recommended Action:</strong> Manual login and verification might be required, or simply wait 24-48 hours.</p>
-            <p><em>Sent by ResuMate</em></p>
+            <p><em>Sent by Instagram AI Agent</em></p>
         `;
 
         const mailOptions = {
