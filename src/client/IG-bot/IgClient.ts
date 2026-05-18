@@ -1776,13 +1776,13 @@ export class IgClient {
     async interactWithHashtags(hashtags: string[], options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; enableCommentLikes?: boolean; };
         limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
-    } = {}) {
+    } = {}): Promise<number> {
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: true }, limits } = options;
 
         if (!hashtags || hashtags.length === 0) {
             this.logger.warn("No hashtags provided for interaction.");
-            return;
+            return 0;
         }
 
         const maxLikesPerHour = limits?.likesPerHour || 10;
@@ -1794,330 +1794,309 @@ export class IgClient {
 
         this.logger.info(`Starting Hashtag Interaction session. Tags: [${hashtags.join(', ')}]`);
 
-        // Pick a random hashtag
-        const tag = hashtags[Math.floor(Math.random() * hashtags.length)];
-        this.logger.info(`Selected hashtag: #${tag}`);
+        let actionsDone = 0;
+        const targetActions = limits?.likesPerSession || 10;
+        const maxPostsToInspect = targetActions * 4; // Safety limit to avoid infinite scrolling
 
-        try {
-            this.logger.info(`Navigating to hashtag page: #${tag}`);
-            await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
+        // Create a copy of hashtags to try them sequentially/randomly
+        const remainingTags = [...hashtags];
 
-            // Allow hydration time (essential for React)
-            this.logger.info("Waiting for page hydration...");
-            await delay(5000);
+        while (remainingTags.length > 0 && actionsDone < targetActions) {
+            // Pick and remove a random hashtag
+            const randomIndex = Math.floor(Math.random() * remainingTags.length);
+            const tag = remainingTags.splice(randomIndex, 1)[0];
+            this.logger.info(`Selected hashtag: #${tag} (${remainingTags.length} tags left in pool)`);
 
-            // Scroll down to trigger lazy-loaded grid
-            await this.page.evaluate(() => window.scrollBy(0, 300));
-            await delay(2000);
-
-            // Check if tag page loaded (posts exist)
-            // Selector for the first post in the grid (Top Posts or Most Recent)
-            // Typically: _aagw is the image container class. 
-            // Better to select by anchor tag in the grid.
-            // --- GRID SCRAPING STRATEGY ---
-            // Instead of just clicking the first post and using "Next" navigation,
-            // we scrape the grid for links to check them BEFORE opening.
-
-            let actionsDone = 0;
-            const targetActions = limits?.likesPerSession || 10;
-            const maxPostsToInspect = targetActions * 4; // Safety limit to avoid infinite scrolling
             let postsChecked = 0;
-            let stabilizationRetries = 0; // NEW: Loop protection
+            let stabilizationRetries = 0; // Loop protection
+            let hashtagLoopBroken = false;
 
-            this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
+            try {
+                this.logger.info(`Navigating to hashtag page: #${tag}`);
+                await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
 
-            while (actionsDone < targetActions && postsChecked < maxPostsToInspect) {
-                let interactionPerformed = false;
-                // Check exit flag
-                if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
-                    this.logger.info('Exit requested. Stopping hashtag loop.');
-                    break;
-                }
+                // Allow hydration time (essential for React)
+                this.logger.info("Waiting for page hydration...");
+                await delay(5000);
 
-                // --- STABILIZATION ---
-                // Ensure page is stable before scraping grid links
-                await delay(1000);
+                // Scroll down to trigger lazy-loaded grid
+                await this.page.evaluate(() => window.scrollBy(0, 300));
+                await delay(2000);
 
-                // 1. Get all visible post links from the grid
-                let postLinks = [];
-                try {
-                    postLinks = await this.page.evaluate(() => {
-                        const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
-                        return links.map(a => ({
-                            href: a.getAttribute('href'),
-                        })).filter(l => l.href);
-                    });
-                } catch (err: any) {
-                    if (err.message?.includes('detached') || err.message?.includes('Execution context was destroyed')) {
-                        stabilizationRetries++;
-                        this.logger.warn(`Frame detached or context destroyed during link scraping (Attempt ${stabilizationRetries}/5). Waiting for page stabilization...`);
-                        
-                        if (stabilizationRetries === 3) {
-                            this.logger.error("Persistent stabilization errors. Attempting page refresh...");
-                            await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-                            await delay(5000);
-                        }
-                        
-                        if (stabilizationRetries >= 5) {
-                            this.logger.error("Failed to stabilize after 5 attempts and a refresh. Skipping hashtag to avoid infinite loop.");
-                            break; 
-                        }
+                this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
 
-                        await delay(5000);
-                        continue; // Retry the loop
+                while (actionsDone < targetActions && postsChecked < maxPostsToInspect) {
+                    let interactionPerformed = false;
+                    // Check exit flag
+                    if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
+                        this.logger.info('Exit requested. Stopping hashtag loop.');
+                        return actionsDone;
                     }
-                    throw err; // Re-throw other errors
-                }
 
-                // Success - reset retries
-                stabilizationRetries = 0;
+                    // --- STABILIZATION ---
+                    // Ensure page is stable before scraping grid links
+                    await delay(1000);
 
-                // --- URL VALIDITY CHECK ---
-                // Ensure we are still on the hashtag page and haven't been redirected (e.g. to login)
-                const currentUrl = this.page.url();
-                if (!currentUrl.includes('/explore/tags/')) {
-                    this.logger.warn(`Bot navigated away from hashtag page to: ${currentUrl}. Breaking loop.`);
-                    break;
-                }
-
-                if (postLinks.length === 0) {
-                    this.logger.warn("No post links found in grid. Scrolling...");
-                    await this.page.evaluate(() => window.scrollBy(0, 500));
-                    await delay(2000);
-                    postsChecked += 5; // Artificial increment to prevent infinite loop if grid is empty
-                    continue;
-                }
-
-                // Pick the post at current index (postsChecked)
-                // If we ran out of links in the current view, scroll down
-                if (postsChecked >= postLinks.length) {
-                    this.logger.info("Reached end of visible links. Scrolling for more...");
-                    await this.page.evaluate(() => window.scrollBy(0, 800));
-                    await delay(3000);
-                    // Re-scan links after scroll
-                    continue;
-                }
-
-                const postData = postLinks[postsChecked];
-                const postUrl = postData.href!;
-                
-                // --- DB CHECK BEFORE OPENING ---
-                const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
-
-                if (isAlreadyLikedDB) {
-                    this.logger.info(`[GRID SKIP] Post ${postsChecked + 1} (${postUrl}) already liked in DB. Not opening.`);
-                    postsChecked++;
-                    continue;
-                }
-
-                // --- OPEN POST ---
-                this.logger.info(`[GRID] Opening unliked post ${postsChecked + 1}: ${postUrl}`);
-                
-                // Find the specific element to click. 
-                // We re-query to ensure we have a fresh handle after scrolls.
-                const postElement = await this.page.$(`a[href="${postUrl}"]`);
-                if (!postElement) {
-                    this.logger.warn(`Could not find element for ${postUrl} in grid. Skipping.`);
-                    postsChecked++;
-                    continue;
-                }
-
-                await postElement.click();
-                await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
-
-                // Connectivity check for modal
-                const modalVisible = await this.page.evaluate(() => !!document.querySelector('div[role="dialog"]'));
-                if (!modalVisible) {
-                    this.logger.warn("Modal did not open. Trying fallback click...");
-                    await postElement.evaluate((el: any) => el.click());
-                    await delay(3000);
-                }
-
-                // --- LIKING LOGIC (Modal) ---
-                // In modal, the Like button selector might be different or standard
-                // Often: svg[aria-label="Like"] or "Unlike"
-                // Connectivity check is crucial here too
-
-                const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
-                if (canLike) {
+                    // 1. Get all visible post links from the grid
+                    let postLinks = [];
                     try {
-                        // OPTIMIZATION: Check for "Unlike" (Already Liked) FIRST to avoid wasted fallback searches
-                        // Structure: section (actions) -> span -> button -> svg[aria-label="Unlike"]
-                        const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
+                        postLinks = await this.page.evaluate(() => {
+                            const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
+                            return links.map(a => ({
+                                href: a.getAttribute('href'),
+                            })).filter(l => l.href);
+                        });
+                    } catch (err: any) {
+                        if (err.message?.includes('detached') || err.message?.includes('Execution context was destroyed')) {
+                            stabilizationRetries++;
+                            this.logger.warn(`Frame detached or context destroyed during link scraping (Attempt ${stabilizationRetries}/5). Waiting for page stabilization...`);
+                            
+                            if (stabilizationRetries === 3) {
+                                this.logger.error("Persistent stabilization errors. Attempting page refresh...");
+                                await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                                await delay(5000);
+                            }
+                            
+                            if (stabilizationRetries >= 5) {
+                                this.logger.error("Failed to stabilize after 5 attempts and a refresh. Skipping current hashtag to avoid infinite loop.");
+                                hashtagLoopBroken = true;
+                                break; 
+                            }
 
-                        // Extract Post URL to check DB
-                        const postUrl = await this.page.url();
-                        const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+                            await delay(5000);
+                            continue; // Retry the loop
+                        }
+                        throw err; // Re-throw other errors
+                    }
 
-                        const shouldSkip = Math.random() < 0.2; // 20% chance to skip
+                    // Success - reset retries
+                    stabilizationRetries = 0;
 
-                        if (shouldSkip) {
-                            this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
-                            await delay(getHumanLikeDelay(2000, 1000));
-                            interactionPerformed = true; // Random skip counts as a simulated action
-                        } else if (await this.page.$(strictUnlikeSelector)) {
-                            this.logger.info(`Post ${postsChecked + 1} already liked (UI).`);
-                            // Also save to DB for future runs to avoid opening
-                            await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
-                        } else {
-                            // Wait for like button to be visible in the modal
-                            // FIX: Target only the MAIN like button in the action bar section, avoiding comments.
-                            // Structure: section (actions) -> span -> button -> svg[aria-label="Like"]
-                            let likeSelector = 'section svg[aria-label="Like"]';
-                            let likeButton = await this.page.$(likeSelector);
+                    // --- URL VALIDITY CHECK ---
+                    // Ensure we are still on the hashtag page and haven't been redirected (e.g. to login)
+                    const currentUrl = this.page.url();
+                    if (!currentUrl.includes('/explore/tags/') && !currentUrl.includes('/explore/search/')) {
+                        this.logger.warn(`Bot navigated away from hashtag page to: ${currentUrl}. Breaking current hashtag loop.`);
+                        hashtagLoopBroken = true;
+                        break;
+                    }
 
-                            // FALLBACK: If strict selector fails (e.g. Reels view), try finding ANY like button that isn't a comment
-                            if (!likeButton) {
-                                // Double check generic unlike before expensive scan
-                                if (await this.page.$('svg[aria-label="Unlike"]')) {
-                                    this.logger.info(`Post ${postsChecked + 1} already liked (Fallback).`);
-                                } else {
-                                    this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
-                                    const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
-                                    for (const btn of potentialButtons) {
-                                        // Exclude if inside a list (ul) or small comment container
-                                        const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]')); // Comments often in divs with role=button acting as hearts
-                                        if (!isComment) {
-                                            likeButton = btn as ElementHandle; // Found a likely candidate
-                                            this.logger.info("Found fallback like button!");
-                                            break;
+                    if (postLinks.length === 0) {
+                        this.logger.warn("No post links found in grid. Scrolling...");
+                        await this.page.evaluate(() => window.scrollBy(0, 500));
+                        await delay(2000);
+                        postsChecked += 5; // Artificial increment to prevent infinite loop if grid is empty
+                        continue;
+                    }
+
+                    // Pick the post at current index (postsChecked)
+                    // If we ran out of links in the current view, scroll down
+                    if (postsChecked >= postLinks.length) {
+                        this.logger.info("Reached end of visible links. Scrolling for more...");
+                        await this.page.evaluate(() => window.scrollBy(0, 800));
+                        await delay(3000);
+                        // Re-scan links after scroll
+                        continue;
+                    }
+
+                    const postData = postLinks[postsChecked];
+                    const postUrl = postData.href!;
+                    
+                    // --- DB CHECK BEFORE OPENING ---
+                    const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+
+                    if (isAlreadyLikedDB) {
+                        this.logger.info(`[GRID SKIP] Post ${postsChecked + 1} (${postUrl}) already liked in DB. Not opening.`);
+                        postsChecked++;
+                        continue;
+                    }
+
+                    // --- OPEN POST ---
+                    this.logger.info(`[GRID] Opening unliked post ${postsChecked + 1}: ${postUrl}`);
+                    
+                    // Find the specific element to click. 
+                    // We re-query to ensure we have a fresh handle after scrolls.
+                    const postElement = await this.page.$(`a[href="${postUrl}"]`);
+                    if (!postElement) {
+                        this.logger.warn(`Could not find element for ${postUrl} in grid. Skipping.`);
+                        postsChecked++;
+                        continue;
+                    }
+
+                    await postElement.click();
+                    await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
+
+                    // Connectivity check for modal
+                    const modalVisible = await this.page.evaluate(() => !!document.querySelector('div[role="dialog"]'));
+                    if (!modalVisible) {
+                        this.logger.warn("Modal did not open. Trying fallback click...");
+                        await postElement.evaluate((el: any) => el.click());
+                        await delay(3000);
+                    }
+
+                    // --- LIKING LOGIC (Modal) ---
+                    const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
+                    if (canLike) {
+                        try {
+                            const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
+                            const postUrl = await this.page.url();
+                            const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+                            const shouldSkip = Math.random() < 0.2; // 20% chance to skip
+
+                            if (shouldSkip) {
+                                this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
+                                await delay(getHumanLikeDelay(2000, 1000));
+                                interactionPerformed = true; // Random skip counts as a simulated action
+                            } else if (await this.page.$(strictUnlikeSelector)) {
+                                this.logger.info(`Post ${postsChecked + 1} already liked (UI).`);
+                                await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
+                            } else {
+                                let likeSelector = 'section svg[aria-label="Like"]';
+                                let likeButton = await this.page.$(likeSelector);
+
+                                if (!likeButton) {
+                                    if (await this.page.$('svg[aria-label="Unlike"]')) {
+                                        this.logger.info(`Post ${postsChecked + 1} already liked (Fallback).`);
+                                    } else {
+                                        this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
+                                        const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
+                                        for (const btn of potentialButtons) {
+                                            const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]'));
+                                            if (!isComment) {
+                                                likeButton = btn as ElementHandle;
+                                                this.logger.info("Found fallback like button!");
+                                                break;
+                                            }
+                                        }
+
+                                        if (!likeButton) {
+                                            this.logger.info(`Like button not found for post ${postsChecked + 1}.`);
                                         }
                                     }
+                                }
 
-                                    if (!likeButton) {
-                                        this.logger.info(`Like button not found for post ${postsChecked + 1}.`);
+                                if (likeButton) {
+                                    const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                                    if (isConnected) {
+                                        this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
+                                        await likeButton.click();
+                                        await delay(getHumanLikeDelay(1500, 800));
+
+                                        await this.checkActionBlock("Hashtag Like Action");
+
+                                        activityTracker.trackAction('likes');
+                                        interactionPerformed = true;
+
+                                        await LikedPost.updateOne(
+                                            { username: this.username, postUrl },
+                                            { $set: { likedAt: new Date() } },
+                                            { upsert: true }
+                                        ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
                                     }
-                                }
-                            }
-
-                            if (likeButton) {
-                                const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
-                                if (isConnected) {
-                                    this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
-                                    await likeButton.click();
-                                    await delay(getHumanLikeDelay(1500, 800));
-
-                                    // CHECK FOR ACTION BLOCK
-                                    await this.checkActionBlock("Hashtag Like Action");
-
-                                    activityTracker.trackAction('likes');
-                                    interactionPerformed = true;
-
-                                    // Save to DB
-                                    await LikedPost.updateOne(
-                                        { username: this.username, postUrl },
-                                        { $set: { likedAt: new Date() } },
-                                        { upsert: true }
-                                    ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        this.logger.warn(`Error liking post in hashtag mode: ${e}`);
-                    }
-
-                    // --- COMMENT LIKING LOGIC (New Feature) ---
-                    if (behavior.enableCommentLikes) {
-                        try {
-                            const commentLikeSelectors = [
-                                'ul svg[aria-label="Like"]', // Standard comment list
-                                'div[role="button"] svg[aria-label="Like"]' // Buttons
-                            ];
-                            // Exclude the main post like button (found in 'section')
-                            // We look for likes that are NOT in a section
-
-                            const allLikeButtons = await this.page.$$('svg[aria-label="Like"]');
-                            let likedCount = 0;
-
-                            for (const btn of allLikeButtons) {
-                                if (likedCount >= 1) break; // Like max 1 comment per post
-
-                                // Check if this button is inside the main action bar (Section)
-                                const isMainLike = await btn.evaluate(el => !!el.closest('section'));
-                                if (isMainLike) continue; // Skip main post like
-
-                                // It's likely a comment!
-                                const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
-                                if (isConnected) {
-                                    this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
-                                    await btn.click();
-                                    await delay(getHumanLikeDelay(1500, 800));
-                                    likedCount++;
                                 }
                             }
                         } catch (e) {
-                            this.logger.warn(`Error liking comment: ${e}`);
-                        }
-                    }
-                } else {
-                    if (behavior.enableLikes !== false) {
-                        this.logger.info("Hourly like limit reached. Stopping hashtag session.");
-                        break;
-                    }
-                }
-
-                // --- CLOSE MODAL ---
-                try {
-                    const closeButton = await this.page.evaluateHandle(() => {
-                        const container = document.querySelector('div[role="dialog"]') || document;
-                        
-                        // 1. Search by SVG aria-label (Internationalized)
-                        const svgs = Array.from(container.querySelectorAll('svg'));
-                        const closeWords = ['close', 'schließen', 'fermer', 'chiudi', 'cerrar', 'dismiss', 'x'];
-                        
-                        const closeSvg = svgs.find(svg => {
-                            const label = (svg.getAttribute('aria-label') || '').toLowerCase();
-                            return closeWords.some(word => label.includes(word));
-                        });
-                        if (closeSvg) return closeSvg.closest('button') || closeSvg.closest('div[role="button"]') || closeSvg;
-
-                        // 2. Search by Button aria-label
-                        const buttons = Array.from(container.querySelectorAll('button, div[role="button"], a'));
-                        const labeledBtn = buttons.find(b => {
-                            const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                            return closeWords.some(word => label.includes(word));
-                        });
-                        if (labeledBtn) return labeledBtn;
-
-                        // 3. Fallback: find any button in the top-right quadrant of the dialog
-                        if (container instanceof HTMLElement) {
-                            const rect = container.getBoundingClientRect();
-                            const topThird = rect.top + (rect.height / 3);
-                            const rightThird = rect.right - (rect.width / 3);
-                            return buttons.find(b => {
-                                const bRect = b.getBoundingClientRect();
-                                return bRect.top < topThird && bRect.right > rightThird;
-                            });
+                            this.logger.warn(`Error liking post in hashtag mode: ${e}`);
                         }
 
-                        return null;
-                    });
-                    const closeBtnHandle = closeButton.asElement();
-                    if (closeBtnHandle) {
-                        this.logger.info("Closing modal via button click...");
-                        await (closeBtnHandle as any).click().catch(() => {});
-                        await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
-                        await delay(1000);
+                        // --- COMMENT LIKING LOGIC ---
+                        if (behavior.enableCommentLikes) {
+                            try {
+                                const allLikeButtons = await this.page.$$('svg[aria-label="Like"]');
+                                let likedCount = 0;
+
+                                for (const btn of allLikeButtons) {
+                                    if (likedCount >= 1) break;
+
+                                    const isMainLike = await btn.evaluate(el => !!el.closest('section'));
+                                    if (isMainLike) continue;
+
+                                    const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
+                                    if (isConnected) {
+                                        this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
+                                        await btn.click();
+                                        await delay(getHumanLikeDelay(1500, 800));
+                                        likedCount++;
+                                    }
+                                }
+                            } catch (e) {
+                                this.logger.warn(`Error liking comment: ${e}`);
+                            }
+                        }
                     } else {
-                        this.logger.warn("Close button not found. Using 'Escape' key.");
-                        await this.page.keyboard.press('Escape');
-                        await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
-                        await delay(1000);
+                        if (behavior.enableLikes !== false) {
+                            this.logger.info("Hourly like limit reached. Stopping hashtag session.");
+                            return actionsDone;
+                        }
                     }
-                } catch (e) {
-                    this.logger.warn("Error closing modal: " + e);
+
+                    // --- CLOSE MODAL ---
+                    try {
+                        const closeButton = await this.page.evaluateHandle(() => {
+                            const container = document.querySelector('div[role="dialog"]') || document;
+                            const svgs = Array.from(container.querySelectorAll('svg'));
+                            const closeWords = ['close', 'schließen', 'fermer', 'chiudi', 'cerrar', 'dismiss', 'x'];
+                            
+                            const closeSvg = svgs.find(svg => {
+                                const label = (svg.getAttribute('aria-label') || '').toLowerCase();
+                                return closeWords.some(word => label.includes(word));
+                            });
+                            if (closeSvg) return closeSvg.closest('button') || closeSvg.closest('div[role="button"]') || closeSvg;
+
+                            const buttons = Array.from(container.querySelectorAll('button, div[role="button"], a'));
+                            const labeledBtn = buttons.find(b => {
+                                const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                                return closeWords.some(word => label.includes(word));
+                            });
+                            if (labeledBtn) return labeledBtn;
+
+                            if (container instanceof HTMLElement) {
+                                const rect = container.getBoundingClientRect();
+                                const topThird = rect.top + (rect.height / 3);
+                                const rightThird = rect.right - (rect.width / 3);
+                                return buttons.find(b => {
+                                    const bRect = b.getBoundingClientRect();
+                                    return bRect.top < topThird && bRect.right > rightThird;
+                                });
+                            }
+
+                            return null;
+                        });
+                        const closeBtnHandle = closeButton.asElement();
+                        if (closeBtnHandle) {
+                            this.logger.info("Closing modal via button click...");
+                            await (closeBtnHandle as any).click().catch(() => {});
+                            await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
+                            await delay(1000);
+                        } else {
+                            this.logger.warn("Close button not found. Using 'Escape' key.");
+                            await this.page.keyboard.press('Escape');
+                            await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
+                            await delay(1000);
+                        }
+                    } catch (e) {
+                        this.logger.warn("Error closing modal: " + e);
+                    }
+
+                    if (interactionPerformed) {
+                        actionsDone++;
+                    }
+                    postsChecked++;
                 }
 
-                // Increment actions only if we actually liked something OR if we randomly skipped.
-                if (interactionPerformed) {
-                    actionsDone++;
-                }
-                postsChecked++;
+            } catch (e) {
+                this.logger.error(`Error in interactWithHashtags for tag #${tag}: ${e}`);
             }
 
-        } catch (e) {
-            this.logger.error(`Error in interactWithHashtags: ${e}`);
+            if (actionsDone >= targetActions) {
+                this.logger.info(`Successfully completed target hashtag actions (${actionsDone}/${targetActions})`);
+                break;
+            } else if (remainingTags.length > 0) {
+                this.logger.warn(`Hashtag #${tag} incomplete or interrupted (${actionsDone}/${targetActions} done). Trying next random hashtag...`);
+            }
         }
+
+        return actionsDone;
     }
 
     /**
@@ -2153,7 +2132,7 @@ export class IgClient {
     async interactWithPosts(options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
         limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
-    } = {}) {
+    } = {}): Promise<number> {
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true }, limits } = options;
 
@@ -2198,7 +2177,7 @@ export class IgClient {
             }
             // ----------------------------------------------------------------
 
-            return;
+            return 0;
         }
 
         // Optimization: Check limits BEFORE entering the loop to save time (skip feed wait if already blocked)
@@ -2207,7 +2186,7 @@ export class IgClient {
 
         if (!initialCanLike && !initialCanComment) {
             this.logger.warn("Hourly limits already reached or features disabled for BOTH actions. Skipping post interaction loop entirely.");
-            return;
+            return 0;
         }
 
         let postIndex = 1; // Start with the first post
@@ -2235,7 +2214,7 @@ export class IgClient {
                 // Check if the post exists
                 if (!(await page.$(postSelector))) {
                     console.log("No more posts found. Ending iteration...");
-                    return;
+                    return actionsDone;
                 }
                 const likeButtonSelector = `${postSelector} svg[aria-label="Like"]`;
                 const likeButton = await page.$(likeButtonSelector);
@@ -2433,6 +2412,7 @@ export class IgClient {
                 break;
             }
         }
+        return actionsDone;
     }
 
     async scrapeFollowers(targetAccount: string, maxFollowers: number) {

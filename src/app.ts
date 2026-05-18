@@ -244,22 +244,34 @@ const processAccount = async (account: any, emailService?: EmailService) => {
       }
 
       // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
+      let actionsCompleted = 0;
       const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
 
       if (useHashtags) {
         accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-        await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
+        actionsCompleted = await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
+        
+        if (actionsCompleted === 0) {
+          accountLogger.warn("Hashtag interaction completed with 0 actions. Attempting fallback FEED strategy...");
+          actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
+        }
       } else {
         accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-        await igClient.interactWithPosts({ behavior, limits: sessionLimits });
+        actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
       }
+
+      // Store actionsCompleted on the client instance so the finally block can access it
+      (igClient as any).actionsCompletedThisSession = actionsCompleted;
+
     } catch (err) {
       throw err; // Re-throw to be caught by outer catch for logging
     } finally {
       // ALWAYS CLOSE after session finishes to save RAM, as rest periods are typically long (45m+)
       // This satisfies the user's request: "when the account is resting the associated browser window can be closed"
       const existingClient = activeSessions.get(account.id);
+      let actionsCompleted = 0;
       if (existingClient) {
+          actionsCompleted = (existingClient as any).actionsCompletedThisSession || 0;
           accountLogger.info(`Closing session for ${account.id} before rest period.`);
           await existingClient.close();
           activeSessions.delete(account.id);
@@ -267,7 +279,14 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 
       // Update the Rest Cycle
       // After finishing interactions and checks, the bot rests
-      const restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
+      // If we did 0 actions (meaning the session had some early failures or skipped entirely), rest for a very short 5-minute retry delay
+      let restDelayMs;
+      if (actionsCompleted === 0) {
+        accountLogger.warn("Performed 0 interactions in this session. Scheduling a short retry delay of 5 minutes instead of a full rest cycle.");
+        restDelayMs = 5 * 60 * 1000;
+      } else {
+        restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
+      }
       scheduleTracker.setNextActiveTime(Date.now() + restDelayMs);
       accountLogger.info(`Account rests. Next active cycle set in ~${Math.round(restDelayMs / 60000)} minutes.`);
 
