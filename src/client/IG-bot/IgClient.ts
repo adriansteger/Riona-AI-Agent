@@ -2156,7 +2156,11 @@ export class IgClient {
             console.log("Feed loaded.");
         } catch (e) {
             console.error("Feed did not load within timeout. Taking debug screenshot.");
-            await page.screenshot({ path: 'logs/debug_feed_error.png' });
+            try {
+                await page.screenshot({ path: 'logs/debug_feed_error.png' });
+            } catch (screenshotErr) {
+                console.error("Failed to take debug feed error screenshot:", screenshotErr);
+            }
 
             // --- DEBUG: Dump Page Content to identify what screen we are on ---
             try {
