@@ -96,6 +96,39 @@ export class IgClient {
         }
     }
 
+    private async ensurePageActive() {
+        if (!this.browser) {
+            await this.init();
+            return;
+        }
+        if (!this.page || this.page.isClosed()) {
+            this.logger.info("Page is closed or missing. Creating a new page...");
+            this.page = await this.browser.newPage();
+            const userAgent = new UserAgent({ deviceCategory: "desktop" });
+            await this.page.setUserAgent(userAgent.toString());
+            await this.page.setViewport({ width: 1280, height: 800 });
+            this.page.setDefaultNavigationTimeout(60000);
+            return;
+        }
+
+        // Test if main frame is detached by doing a simple evaluate
+        try {
+            await this.page.evaluate(() => 1);
+        } catch (err: any) {
+            if (err.message?.includes('detached') || err.message?.includes('closed') || err.message?.includes('destroyed')) {
+                this.logger.warn(`Detected detached frame or destroyed context on page. Recreating page...`);
+                try {
+                    await this.page.close().catch(() => {});
+                } catch {}
+                this.page = await this.browser.newPage();
+                const userAgent = new UserAgent({ deviceCategory: "desktop" });
+                await this.page.setUserAgent(userAgent.toString());
+                await this.page.setViewport({ width: 1280, height: 800 });
+                this.page.setDefaultNavigationTimeout(60000);
+            }
+        }
+    }
+
     async init() {
         if (this.isConnected()) {
             this.logger.info("Browser already active and connected. Skipping launch.");
@@ -1399,6 +1432,7 @@ export class IgClient {
     }
 
     async checkAndRespondToDMs(limits?: { dmsPerHour?: number }) {
+        await this.ensurePageActive();
         if (!this.page) throw new Error("Page not initialized");
 
         // --- DM REQUESTS CHECK ---
@@ -1426,17 +1460,22 @@ export class IgClient {
             // Listen for browser console logs (DEBUG)
             this.page.on('console', consoleHandler);
 
-            await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
-            await delay(3000);
-            await this.handleNotificationPopup();
+            const initialUrl = this.page.url();
+            if (!initialUrl.includes("/direct/")) {
+                this.logger.info("Navigating to Instagram DM inbox...");
+                await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+                await delay(3000);
+                await this.handleNotificationPopup();
+            }
 
             let processedCount = 0;
             const maxToProcess = Math.min(dmsPerHour, 10);
 
             while (processedCount < maxToProcess) {
-                if (processedCount > 0) {
-                    this.logger.info(`[DM BATCH] Processing next item ${processedCount + 1}/${maxToProcess}`);
-                    await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+                const currentUrl = this.page.url();
+                if (!currentUrl.includes("/direct/")) {
+                    this.logger.info(`[DM BATCH] Navigating back to inbox...`);
+                    await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
                     await delay(3000);
                     await this.handleNotificationPopup();
                 }
@@ -1544,6 +1583,7 @@ export class IgClient {
 
                 const unreadThreadEl = unreadThread ? unreadThread.asElement() : null;
                 if (unreadThreadEl) {
+                    let responseSent = false;
                     this.logger.info("Found unread DM thread! Opening...");
                     await unreadThreadEl.evaluate((el) => (el as HTMLElement).click());
                     await delay(3000);
@@ -1734,11 +1774,17 @@ export class IgClient {
                             this.logger.info("Waiting 10s before next DM to respect rate limits...");
                             await delay(10000);
 
+                            responseSent = true;
                             processedCount++;
                         }
                     }
                     // Random delay between messages in batch
-                    await delay(3000 + Math.random() * 5000);
+                    if (responseSent) {
+                        await delay(3000 + Math.random() * 5000);
+                    } else {
+                        // Quick settle delay if we just inspected and skipped
+                        await delay(1000);
+                    }
                 } else {
                     this.logger.info("No unread DMs found. Batch finished.");
                     break;
@@ -1812,8 +1858,9 @@ export class IgClient {
             let hashtagLoopBroken = false;
 
             try {
+                await this.ensurePageActive();
                 this.logger.info(`Navigating to hashtag page: #${tag}`);
-                await this.page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
+                await this.gotoWithRetry(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
 
                 // Allow hydration time (essential for React)
                 this.logger.info("Waiting for page hydration...");
@@ -2033,8 +2080,8 @@ export class IgClient {
                     // --- CLOSE MODAL ---
                     try {
                         const closeButton = await this.page.evaluateHandle(() => {
-                            const container = document.querySelector('div[role="dialog"]') || document;
-                            const svgs = Array.from(container.querySelectorAll('svg'));
+                            // Search the entire document first, as the close button is often outside the dialog box itself (in the overlay wrapper)
+                            const svgs = Array.from(document.querySelectorAll('svg'));
                             const closeWords = ['close', 'schließen', 'fermer', 'chiudi', 'cerrar', 'dismiss', 'x'];
                             
                             const closeSvg = svgs.find(svg => {
@@ -2043,18 +2090,23 @@ export class IgClient {
                             });
                             if (closeSvg) return closeSvg.closest('button') || closeSvg.closest('div[role="button"]') || closeSvg;
 
-                            const buttons = Array.from(container.querySelectorAll('button, div[role="button"], a'));
-                            const labeledBtn = buttons.find(b => {
-                                const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                                return closeWords.some(word => label.includes(word));
+                            // If no SVG found, search buttons/divs in the document with aria-label or text matching close words
+                            const elements = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                            const labeledEl = elements.find(el => {
+                                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                                const text = (el.textContent || '').toLowerCase().trim();
+                                return closeWords.some(word => label.includes(word) || text === word);
                             });
-                            if (labeledBtn) return labeledBtn;
+                            if (labeledEl) return labeledEl;
 
-                            if (container instanceof HTMLElement) {
-                                const rect = container.getBoundingClientRect();
+                            // As a last fallback inside the dialog, look for a button in the top-right area, but strictly exclude 'a' tags (links) to avoid navigation!
+                            const dialog = document.querySelector('div[role="dialog"]');
+                            if (dialog instanceof HTMLElement) {
+                                const rect = dialog.getBoundingClientRect();
                                 const topThird = rect.top + (rect.height / 3);
                                 const rightThird = rect.right - (rect.width / 3);
-                                return buttons.find(b => {
+                                const candidates = Array.from(dialog.querySelectorAll('button, div[role="button"]'));
+                                return candidates.find(b => {
                                     const bRect = b.getBoundingClientRect();
                                     return bRect.top < topThird && bRect.right > rightThird;
                                 });
@@ -2133,6 +2185,7 @@ export class IgClient {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
         limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
     } = {}): Promise<number> {
+        await this.ensurePageActive();
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true }, limits } = options;
 
