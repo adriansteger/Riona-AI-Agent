@@ -95,7 +95,9 @@ export function chooseCharacter(characterFilename?: string): any {
 
   try {
     const adrianStylePath = path.join(__dirname, "..", "config", "adrian-style");
-    baseConfig = require(adrianStylePath).default || require(adrianStylePath).adrianStyleConfig;
+    const rawConfig = require(adrianStylePath).default || require(adrianStylePath).adrianStyleConfig;
+    // Deep clone to prevent mutating shared cached object across different account loops
+    baseConfig = JSON.parse(JSON.stringify(rawConfig));
   } catch (e) {
     logger.error("Failed to load base configuration (adrian-style):", e);
     // Minimal fallback if base configuration fails
@@ -107,13 +109,8 @@ export function chooseCharacter(characterFilename?: string): any {
 
   // If no specific filename, or explicitly adrian-style, return base (potentially with legacy merge)
   if (!characterFilename || characterFilename === 'adrian-style') {
-    // Legacy behavior: try to merge Ascotech if it exists by default? 
-    // Or just return base. Let's return base but keep the legacy "auto-merge" if user didn't specify.
     if (!characterFilename) {
-      // ... existing legacy auto-merge logic if desired, or skip. 
-      // For strictness, if no file specified, just return base. 
       logger.info("No character specified. Using default Adrian style.");
-      return baseConfig;
     }
     return baseConfig;
   }
@@ -153,6 +150,17 @@ export function chooseCharacter(characterFilename?: string): any {
       if (charData.limits) {
         baseConfig.limits = { ...baseConfig.limits, ...charData.limits };
       }
+
+      // 5. Copy direct character fields for IgClient and prompt generation to consume
+      baseConfig.name = charData.name;
+      baseConfig.goal = charData.goal;
+      baseConfig.bio = charData.bio;
+      baseConfig.lore = charData.lore;
+      baseConfig.topics = charData.topics;
+      baseConfig.adjectives = charData.adjectives;
+      baseConfig.style = charData.style;
+      baseConfig.location = charData.location;
+      baseConfig.messageExamples = charData.messageExamples;
 
       logger.info(`Merged ${characterFilename} into base configuration.`);
       return baseConfig;

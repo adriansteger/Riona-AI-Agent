@@ -150,7 +150,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
     if (Date.now() < nextActiveTime) {
       if (behavior.enableAutoDMs === true) {
         const lastDMCheck = scheduleTracker.getLastDMCheckTime();
-        const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
+        const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
         if (Date.now() - lastDMCheck >= dmIntervalMs) {
           isDMOnlyRun = true;
           accountLogger.info(`Account is resting, but executing a quick, headless DM-only check (last checked ${Math.round((Date.now() - lastDMCheck) / 60000)}m ago).`);
@@ -179,7 +179,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
         accountLogger.info(`Active cycle is due, but the heavy interaction slot is busy (${interactionLimit.activeCount}/${interactionLimit.concurrency} active).`);
         if (behavior.enableAutoDMs === true) {
           const lastDMCheck = scheduleTracker.getLastDMCheckTime();
-          const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
+          const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
           if (Date.now() - lastDMCheck >= dmIntervalMs) {
             isDMOnlyRun = true;
             accountLogger.info(`Executing a quick, headless DM-only check instead of full interaction cycle.`);
@@ -211,7 +211,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
     const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 20) : 0; // Increased default to 20
+    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 50) : 0; // Increased default to 50
 
     let isBlocked = true;
     let maxWaitTime = 0;
@@ -336,8 +336,8 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 
           // Update the Rest/DM Cycles
           if (isDMOnlyRun) {
-            const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 5);
-            const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
+            const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 2);
+            const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
             scheduleTracker.setLastDMCheckTime(Date.now() + (nextCheckMinutes * 60000) - dmIntervalMs);
             accountLogger.info(`DM-only check completed. Next DM check available in ~${nextCheckMinutes} minutes.`);
           } else {

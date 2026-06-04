@@ -1279,7 +1279,7 @@ export class IgClient {
     async checkAndAcceptDMRequests(page: puppeteer.Page, limits?: { dmsPerHour?: number }) {
         if (!page) return;
 
-        const dmsPerHour = limits?.dmsPerHour || 5;
+        const dmsPerHour = limits?.dmsPerHour || 50;
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
 
@@ -1325,21 +1325,6 @@ export class IgClient {
                 console.log(`[REQ DEBUG] Analysis Complete. Found ${candidates} visible candidates.`);
             });
 
-            // DEBUG: Screenshot
-            try {
-                if (!page.isClosed()) {
-                    const screenshotPath = path.resolve('screenshots', `requests_debug_${Date.now()}.png`);
-                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
-                    await page.screenshot({ path: screenshotPath });
-                    this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
-                }
-            } catch (e) { /* ignore */ }
-
-            if (page.isClosed()) {
-                this.logger.warn("Page is closed. Aborting requests loop.");
-                return;
-            }
-
             // Strategy 1: Specific Listbox Buttons
             let requests: ElementHandle<Element>[] = await page.$$('div[role="listbox"] div[role="button"]');
 
@@ -1348,6 +1333,18 @@ export class IgClient {
                 this.logger.info("Strategy 1 (Listbox) failed. Trying Strategy 2 (Broad Rows)...");
                 requests = await page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
             }
+
+            // Save debug screenshot ONLY if element detection failed
+            if (requests.length === 0 && !page.isClosed()) {
+                this.logger.warn("Failed to detect any DM requests. Saving debug screenshot...");
+                try {
+                    const screenshotPath = path.resolve('screenshots', `requests_failed_${Date.now()}.png`);
+                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
+                    await page.screenshot({ path: screenshotPath });
+                    this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
+                } catch (e) { /* ignore */ }
+            }
+
 
             // Strategy 3: Text Search for "Request" context (Blind Attempt)
             if (requests.length === 0 && !page.isClosed()) {
@@ -1571,6 +1568,17 @@ export class IgClient {
                 const charGoal = this.character?.goal || "Engage naturally.";
                 const charLocation = this.character?.location || "Unknown";
 
+                const rawExamples = this.character?.messageExamples || [];
+                let formattedExamples = "";
+                if (rawExamples.length > 0) {
+                    formattedExamples = "\n[EXAMPLE CONVERSATIONS]\n" + rawExamples.map((exList: any[]) => {
+                        return exList.map((msg: any) => {
+                            const role = msg.user === "{{user1}}" ? "User" : charName;
+                            return `${role}: ${msg.content?.text || ""}`;
+                        }).join('\n');
+                    }).join('\n---\n') + "\n";
+                }
+
                 const prompt = `You are ${charName} on Instagram.
             
             Your Bio: ${charBio}
@@ -1580,7 +1588,7 @@ export class IgClient {
             Your Location: ${charLocation}
             
             Your Main Goal: ${charGoal}
-            
+            ${formattedExamples}
             You are replying to a DM thread with user: "${partnerUsername}".
 
             [KNOWN FACTS ABOUT USER]
@@ -1589,15 +1597,14 @@ export class IgClient {
             [CONVERSATION HISTORY (Last 10 messages)]
             ${historyText}
 
-            Language Configuration:
+             Language Configuration:
             - You speak: [${this.languages.join(', ')}]
             - Default Language: "${this.defaultLanguage}"
             
             Task: Generate a natural response as ${charName}.
             Guidelines:
-            - Detect the language of the incoming message.
-            - If it matches one of your spoken languages above, reply in that language.
-            - Otherwise, reply in your Default Language (${this.defaultLanguage}).
+            - IMPORTANT: ALWAYS detect the language of the user's latest incoming message. You MUST respond in that same language (e.g., if the latest message is in German, reply in German; if in French, reply in French). Fallback to your Default Language ("${this.defaultLanguage}") ONLY if the user's language is not one of your spoken languages.
+            - UNIQUE RESPONSES: Avoid repetition. Do NOT repeat or reuse exact sentences, structures, or phrases from your previous messages in the conversation history. Every response must be unique and contextually fresh.
             - Keep it concise (1-2 sentences usually).
             - Match your specific tone and style defined above.
             - If the message is "hi" or generic, reply in character.
@@ -1666,7 +1673,7 @@ export class IgClient {
 
         this.dmsProcessedThisSession = false;
 
-        const dmsPerHour = limits?.dmsPerHour || 5;
+        const dmsPerHour = limits?.dmsPerHour || 50;
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
 
