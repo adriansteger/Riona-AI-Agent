@@ -40,12 +40,14 @@ export class IgClient {
     private logger: any; // Using any or specific Logger type if available
     private character: any;
     private emailService?: EmailService;
+    private headless: boolean | "shell";
+    public dmsProcessedThisSession: boolean = false;
 
     private languages: string[] = ['English'];
     private defaultLanguage: string = 'English';
 
     constructor(
-        config: { username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string },
+        config: { username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string, headless?: boolean | "shell" },
         loggerInstance?: any,
         character?: any,
         emailService?: EmailService
@@ -59,6 +61,7 @@ export class IgClient {
         this.emailService = emailService;
         this.languages = config.languages || ['English'];
         this.defaultLanguage = config.defaultLanguage || 'English';
+        this.headless = config.headless !== undefined ? config.headless : false;
     }
 
     public isConnected(): boolean {
@@ -189,7 +192,7 @@ export class IgClient {
         }
 
         const launchOptions: any = {
-            headless: false,
+            headless: this.headless,
             executablePath: executablePath || undefined, // Use system browser on Linux if found
             args: launchArgs,
             defaultViewport: null, // Ensure viewport matches window
@@ -1266,8 +1269,13 @@ export class IgClient {
 
 
 
-    async checkAndAcceptDMRequests() {
+    async checkAndAcceptDMRequests(limits?: { dmsPerHour?: number }) {
+        await this.ensurePageActive();
         if (!this.page) return;
+
+        const dmsPerHour = limits?.dmsPerHour || 5;
+        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const activityTracker = new ActivityTracker(accountId);
 
         // Listener handler
         const consoleHandler = (msg: any) => {
@@ -1279,10 +1287,14 @@ export class IgClient {
             this.page.on('console', consoleHandler);
 
             this.logger.info("Checking for DM Requests...");
-            await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "domcontentloaded" });
+            await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
             await delay(3000);
 
             // DEBUG: Dump Page Structure to identify selectors
+            if (!this.page || this.page.isClosed()) {
+                this.logger.warn("Page is closed or missing. Aborting requests loop.");
+                return;
+            }
             await this.page.evaluate(() => {
                 console.log("[REQ DEBUG] Analysis Started.");
                 const allDivs = Array.from(document.querySelectorAll('div, a, button'));
@@ -1309,23 +1321,30 @@ export class IgClient {
 
             // DEBUG: Screenshot
             try {
-                const screenshotPath = path.resolve('screenshots', `requests_debug_${Date.now()}.png`);
-                await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
-                await this.page.screenshot({ path: screenshotPath });
-                this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
+                if (this.page && !this.page.isClosed()) {
+                    const screenshotPath = path.resolve('screenshots', `requests_debug_${Date.now()}.png`);
+                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
+                    await this.page.screenshot({ path: screenshotPath });
+                    this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
+                }
             } catch (e) { /* ignore */ }
+
+            if (!this.page || this.page.isClosed()) {
+                this.logger.warn("Page is closed or missing. Aborting requests loop.");
+                return;
+            }
 
             // Strategy 1: Specific Listbox Buttons
             let requests: ElementHandle<Element>[] = await this.page.$$('div[role="listbox"] div[role="button"]');
 
             // Strategy 2: Broad "listitem" or "row"
-            if (requests.length === 0) {
+            if (requests.length === 0 && this.page && !this.page.isClosed()) {
                 this.logger.info("Strategy 1 (Listbox) failed. Trying Strategy 2 (Broad Rows)...");
                 requests = await this.page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
             }
 
             // Strategy 3: Text Search for "Request" context (Blind Attempt)
-            if (requests.length === 0) {
+            if (requests.length === 0 && this.page && !this.page.isClosed()) {
                 this.logger.info("Strategy 2 failed. Trying Strategy 3 (Any wide button)...");
                 // Filter for elements that look like user rows
                 requests = await this.page.evaluateHandle(() => {
@@ -1355,6 +1374,11 @@ export class IgClient {
 
             const maxToAccept = Math.min(requests.length, 3);
             for (let i = 0; i < maxToAccept; i++) {
+                if (!this.page || this.page.isClosed()) {
+                    this.logger.warn("Page is closed or missing. Aborting requests loop.");
+                    break;
+                }
+
                 // Re-fetch using SHAPE STRATEGY (The only one that works)
                 const currentRequests = await this.page.evaluateHandle(() => {
                     const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
@@ -1385,13 +1409,18 @@ export class IgClient {
                 try {
                     const text = await currentRequests[0].evaluate(el => (el as HTMLElement).innerText.substring(0, 30));
                     this.logger.info(`Clicking request item: "${text.replace(/\n/g, ' ')}..."`);
-                    await currentRequests[0].click();
+                    await currentRequests[0].evaluate(el => (el as HTMLElement).click());
                 } catch (e) {
                     this.logger.warn(`Failed to click request item: ${e}`);
                     break;
                 }
 
                 await delay(3000);
+
+                if (!this.page || this.page.isClosed()) {
+                    this.logger.warn("Page was closed during interaction. Aborting loop.");
+                    break;
+                }
 
                 // Find "Accept" button
                 const acceptBtn = await this.page.evaluateHandle(() => {
@@ -1403,6 +1432,11 @@ export class IgClient {
                 if (acceptBtnEl) {
                     await (acceptBtnEl as ElementHandle<Element>).click();
                     await delay(3000);
+
+                    if (!this.page || this.page.isClosed()) {
+                        this.logger.warn("Page was closed after clicking Accept.");
+                        break;
+                    }
 
                     // Handle "Move to Primary" dialog if it appears
                     const primaryBtn = await this.page.evaluateHandle(() => {
@@ -1417,29 +1451,219 @@ export class IgClient {
                     }
 
                     this.logger.info(`Accepted DM request ${i + 1}/${maxToAccept}`);
+
+                    // Respond immediately to the newly accepted chat!
+                    await this.respondToCurrentOpenChat(activityTracker, dmsPerHour);
                 } else {
                     this.logger.warn(`Could not find Accept button for request ${i + 1}.`);
                 }
 
-                await this.page.goto("https://www.instagram.com/direct/requests/", { waitUntil: "domcontentloaded" });
+                if (!this.page || this.page.isClosed()) {
+                    this.logger.warn("Page was closed. Aborting requests loop.");
+                    break;
+                }
+
+                await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
                 await delay(3000);
             }
         } catch (e) {
             this.logger.error(`Error accepting DM requests: ${e}`);
         } finally {
-            this.page.off('console', consoleHandler);
+            if (this.page && !this.page.isClosed()) {
+                this.page.off('console', consoleHandler);
+            }
         }
+    }
+
+    private async respondToCurrentOpenChat(activityTracker: ActivityTracker, dmsPerHour: number): Promise<boolean> {
+        if (!this.page || this.page.isClosed()) return false;
+
+        // Check rate limits
+        if (!activityTracker.canPerformAction('dms', dmsPerHour)) {
+            this.logger.info(`Skipping reply: DM rate limit reached.`);
+            return false;
+        }
+
+        try {
+            // 1. Detect conversation partner username from Header
+            const partnerUsername = await this.page.evaluate(() => {
+                const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
+                if (!header) {
+                    const textBox = document.querySelector('div[role="textbox"]');
+                    const label = textBox?.getAttribute('aria-label');
+                    if (label) return label.replace('Message', '').trim();
+                }
+                return header?.textContent?.trim() || "User";
+            });
+
+            // 2. Scrape last 10 messages for context
+            const history = await this.page.evaluate(() => {
+                const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
+                if (messages.length === 0) return [];
+
+                const historyData = [];
+                let count = 0;
+                for (let i = messages.length - 1; i >= 0 && count < 10; i--) {
+                    const node = messages[i];
+                    const text = node.textContent?.trim() || "";
+                    if (!text) continue;
+
+                    let isMine = false;
+                    let el: HTMLElement | null = node as HTMLElement;
+                    let depth = 0;
+                    while (el && depth < 6) {
+                        const style = window.getComputedStyle(el);
+                        const bg = style.backgroundColor;
+                        if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
+                            isMine = true;
+                            break;
+                        }
+                        el = el.parentElement;
+                        depth++;
+                    }
+                    if (!isMine) {
+                        const rect = node.getBoundingClientRect();
+                        const viewWidth = window.innerWidth;
+                        if (rect.left > viewWidth * 0.5) isMine = true;
+                    }
+
+                    historyData.unshift({ text, isMine });
+                    count++;
+                }
+                return historyData;
+            });
+
+            const lastMessage = history[history.length - 1];
+            if (lastMessage && lastMessage.isMine) {
+                this.logger.info(`Last message in current chat is from ME: "${lastMessage.text.substring(0, 30)}...". Skipping.`);
+                return false;
+            } else if (lastMessage) {
+                this.logger.info(`Conversation Context (${history.length} msgs). Last from Partner: "${lastMessage.text.substring(0, 30)}..."`);
+                const lastMessageText = lastMessage.text;
+
+                // Generate Response
+                const schema = getInstagramDMResponseSchema();
+
+                let existingFacts: string[] = [];
+                if (partnerUsername) {
+                    try {
+                        const contact = await Contact.findOne({ username: partnerUsername });
+                        if (contact && contact.facts) existingFacts = contact.facts;
+                    } catch (err) {
+                        this.logger.warn(`Failed to fetch contact info: ${err}`);
+                    }
+                }
+
+                const historyText = history.map(h => h.isMine ? `[Me]: ${h.text}` : `[Him]: ${h.text}`).join('\n');
+
+                const charName = this.character?.aiPersona?.name || this.character?.name || "User";
+                const charBio = (this.character?.bio || []).join(" ");
+                const charLore = (this.character?.lore || []).join(" ");
+                const charTopics = (this.character?.topics || []).join(", ");
+                const charAdjectives = (this.character?.adjectives || []).join(", ");
+                const charStyle = (this.character?.style?.all || []).join(" ");
+                const charGoal = this.character?.goal || "Engage naturally.";
+                const charLocation = this.character?.location || "Unknown";
+
+                const prompt = `You are ${charName} on Instagram.
+            
+            Your Bio: ${charBio}
+            Your Lore/Backstory: ${charLore}
+            Your Interests: ${charTopics}
+            Your Style/Tone: ${charAdjectives} ${charStyle}
+            Your Location: ${charLocation}
+            
+            Your Main Goal: ${charGoal}
+            
+            You are replying to a DM thread with user: "${partnerUsername}".
+
+            [KNOWN FACTS ABOUT USER]
+            ${existingFacts.length > 0 ? existingFacts.map(f => `- ${f}`).join('\n') : "(None yet)"}
+
+            [CONVERSATION HISTORY (Last 10 messages)]
+            ${historyText}
+
+            Language Configuration:
+            - You speak: [${this.languages.join(', ')}]
+            - Default Language: "${this.defaultLanguage}"
+            
+            Task: Generate a natural response as ${charName}.
+            Guidelines:
+            - Detect the language of the incoming message.
+            - If it matches one of your spoken languages above, reply in that language.
+            - Otherwise, reply in your Default Language (${this.defaultLanguage}).
+            - Keep it concise (1-2 sentences usually).
+            - Match your specific tone and style defined above.
+            - If the message is "hi" or generic, reply in character.
+            - If it's spam, ignore it (return empty string or "IGNORE").
+            - Do not be overly helpful assistant-like; be the character.
+            - IMPORTANT: Extract any NEW permanent facts about the user (e.g. name, age, city, pets, likes, relationships) from the conversation. Return them in the 'memory_updates' field.
+            `;
+
+                const result = await runAgent(schema, prompt);
+                let responseText = result[0]?.response;
+                let newFacts = result[0]?.memory_updates || [];
+
+                if (newFacts.length > 0 && partnerUsername) {
+                    try {
+                        await Contact.findOneAndUpdate(
+                            { username: partnerUsername },
+                            {
+                                $addToSet: { facts: { $each: newFacts } },
+                                $set: { lastInteraction: new Date() }
+                            },
+                            { upsert: true, new: true }
+                        );
+                        this.logger.info(`Saved ${newFacts.length} new facts for ${partnerUsername}: ${newFacts.join(', ')}`);
+                    } catch (err) {
+                        this.logger.error(`Failed to save facts: ${err}`);
+                    }
+                }
+
+                if (responseText && responseText !== "IGNORE") {
+                    this.logger.info(`Generated response: "${responseText}"`);
+                    await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
+                    await delay(1000);
+
+                    const sendBtn = await this.page.evaluateHandle(() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        return buttons.find(b => b.textContent === 'Send') || null;
+                    });
+
+                    const sendBtnEl = sendBtn.asElement();
+                    if (sendBtnEl) {
+                        await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
+                        this.logger.info("DM Sent.");
+                        activityTracker.trackAction('dms');
+                        this.dmsProcessedThisSession = true;
+                    } else {
+                        await this.page.keyboard.press('Enter');
+                        this.logger.info("DM Sent (via Enter key).");
+                        activityTracker.trackAction('dms');
+                        this.dmsProcessedThisSession = true;
+                    }
+
+                    this.logger.info("Waiting 10s before next DM to respect rate limits...");
+                    await delay(10000);
+                    return true;
+                }
+            }
+        } catch (e) {
+            this.logger.error(`Error in respondToCurrentOpenChat: ${e}`);
+        }
+        return false;
     }
 
     async checkAndRespondToDMs(limits?: { dmsPerHour?: number }) {
         await this.ensurePageActive();
         if (!this.page) throw new Error("Page not initialized");
 
+        this.dmsProcessedThisSession = false;
+
         // --- DM REQUESTS CHECK ---
-        await this.checkAndAcceptDMRequests();
+        await this.checkAndAcceptDMRequests(limits);
 
         const dmsPerHour = limits?.dmsPerHour || 5;
-        // Check local activity tracker here too if needed, but app.ts should handle high level
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
 
@@ -1461,7 +1685,7 @@ export class IgClient {
             this.page.on('console', consoleHandler);
 
             const initialUrl = this.page.url();
-            if (!initialUrl.includes("/direct/")) {
+            if (!initialUrl.includes("/direct/inbox") && !initialUrl.includes("/direct/t/")) {
                 this.logger.info("Navigating to Instagram DM inbox...");
                 await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
                 await delay(3000);
@@ -1471,323 +1695,115 @@ export class IgClient {
             let processedCount = 0;
             const maxToProcess = Math.min(dmsPerHour, 10);
 
+            // Active chat session polling
+            let lastInteractionTime = Date.now();
+            const sessionTimeoutMs = 2 * 60 * 1000; // 2 minutes timeout for active conversation
+            let hasProcessedAny = false;
+
             while (processedCount < maxToProcess) {
+                if (!this.page || this.page.isClosed()) {
+                    this.logger.warn("Page was closed during DM polling. Exiting.");
+                    break;
+                }
+
+                // Check rate limits dynamically
+                if (!activityTracker.canPerformAction('dms', dmsPerHour)) {
+                    this.logger.info("Hourly DM rate limit reached during polling. Exiting.");
+                    break;
+                }
+
                 const currentUrl = this.page.url();
-                if (!currentUrl.includes("/direct/")) {
+                if (!currentUrl.includes("/direct/inbox") && !currentUrl.includes("/direct/t/")) {
                     this.logger.info(`[DM BATCH] Navigating back to inbox...`);
                     await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
                     await delay(3000);
                     await this.handleNotificationPopup();
                 }
 
-                // Debug Screenshot
-                try {
-                    const screenshotPath = path.resolve('screenshots', `inbox_debug_${Date.now()}.png`);
-                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
-                    await this.page.screenshot({ path: screenshotPath });
-                    this.logger.info(`Saved debug screenshot to: ${screenshotPath}`);
-                } catch (e) { /* ignore */ }
-
-                // Retry logic for Detached Frame errors
+                // Look for unread threads in the listbox
                 let unreadThread;
-                for (let attempt = 1; attempt <= 2; attempt++) {
-                    try {
-                        const myUsername = this.username;
-                        unreadThread = await this.page.evaluateHandle((myUser) => {
-                            // Selector: Items INSIDE the Message Listbox (role="listbox")
-                            // We look for buttons OR links to be safe.
-                            let threads = Array.from(document.querySelectorAll('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
-
-                            // Fallback: If no listbox found (different layout), try broad search but exclude top bar
-                            if (threads.length === 0) {
-                                console.log("[DM DEBUG] No role='listbox' found. Using broad search...");
-                                // Exclude div with role="tablist" (stories) usually
-                                threads = Array.from(document.querySelectorAll('div[role="button"], a[href^="/direct/t/"]'));
-                            }
-
-                            console.log(`[DM DEBUG] Found ${threads.length} candidates.`);
-
-                            return threads.find((t, index) => {
-                                const textContent = (t as HTMLElement).innerText || '';
-
-                                // FILTER: Ignore "Notes" / Self-reference
-                                if (textContent.toLowerCase().includes(myUser.toLowerCase())) {
-                                    if (index < 3) console.log(`[DM DEBUG] Item ${index} SKIPPED (Self): "${textContent.substring(0, 15)}..."`);
-                                    return false;
-                                }
-
-                                // FILTER: Shape Check (CRITICAL)
-                                // DM Threads are wide rectangles (Row). Notes/Stories are circles/squares (Column).
-                                // We skip anything that looks like a "Bubble".
-                                const rect = t.getBoundingClientRect();
-                                const aspectRatio = rect.width / rect.height;
-                                if (aspectRatio < 1.5) {
-                                    if (index < 5) console.log(`[DM DEBUG] Item ${index} SKIPPED (Bubble/Note): Ratio=${aspectRatio.toFixed(2)} (${Math.round(rect.width)}x${Math.round(rect.height)})`);
-                                    return false;
-                                }
-
-
-                                if (index < 3) {
-                                    const cleanHtml = t.outerHTML.replace(/\s+/g, ' ').substring(0, 50);
-                                    console.log(`[DM DEBUG] Item ${index} fragment: ${cleanHtml}`);
-                                }
-
-                                const label = t.getAttribute('aria-label') || '';
-                                const hasBlueDot = (() => {
-                                    const allChildren = t.querySelectorAll('*');
-                                    for (const child of allChildren) {
-                                        const style = window.getComputedStyle(child);
-                                        if (style.backgroundColor.includes('0, 149, 246')) return true;
-                                        if (style.height === '8px' && style.borderRadius === '50%') return true;
-                                    }
-                                    return false;
-                                })();
-
-                                const hasBoldText = (() => {
-                                    const allChildren = t.querySelectorAll('*');
-                                    for (const child of allChildren) {
-                                        const w = window.getComputedStyle(child).fontWeight;
-                                        if (w === '600' || w === '700' || w === 'bold') return true;
-                                    }
-                                    return false;
-                                })();
-
-                                if (index < 3) console.log(`[DM DEBUG] Item ${index}: Label="${label}", BlueDot=${hasBlueDot}, Bold=${hasBoldText}`);
-
-                                if (label.toLowerCase().includes('unread')) {
-                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: Aria)`);
-                                    return true;
-                                }
-                                if (hasBlueDot) {
-                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: BlueDot)`);
-                                    return true;
-                                }
-                                if (hasBoldText) {
-                                    console.log(`[DM DEBUG] MATCH at index ${index} (Reason: BoldText)`);
-                                    return true;
-                                }
-
-                                return false;
-                            }) || null;
-                        }, myUsername);
-                        break; // Success
-                    } catch (err: any) {
-                        if (err.message && err.message.includes('detached Frame') && attempt === 1) {
-                            this.logger.warn("Frame detached during DM check. Retrying...");
-                            await delay(2000);
-                            continue;
+                try {
+                    const myUsername = this.username;
+                    unreadThread = await this.page.evaluateHandle((myUser) => {
+                        let threads = Array.from(document.querySelectorAll('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
+                        if (threads.length === 0) {
+                            threads = Array.from(document.querySelectorAll('div[role="button"], a[href^="/direct/t/"]'));
                         }
-                        throw err; // Re-throw if not detached frame or max attempts
-                    }
+                        return threads.find((t, index) => {
+                            const textContent = (t as HTMLElement).innerText || '';
+                            if (textContent.toLowerCase().includes(myUser.toLowerCase())) return false;
+                            
+                            const rect = t.getBoundingClientRect();
+                            const aspectRatio = rect.width / rect.height;
+                            if (aspectRatio < 1.5) return false;
+
+                            const label = t.getAttribute('aria-label') || '';
+                            const hasBlueDot = (() => {
+                                const allChildren = t.querySelectorAll('*');
+                                for (const child of allChildren) {
+                                    const style = window.getComputedStyle(child);
+                                    if (style.backgroundColor.includes('0, 149, 246')) return true;
+                                    if (style.height === '8px' && style.borderRadius === '50%') return true;
+                                }
+                                return false;
+                            })();
+
+                            const hasBoldText = (() => {
+                                const allChildren = t.querySelectorAll('*');
+                                for (const child of allChildren) {
+                                    const w = window.getComputedStyle(child).fontWeight;
+                                    if (w === '600' || w === '700' || w === 'bold') return true;
+                                }
+                                return false;
+                            })();
+
+                            if (label.toLowerCase().includes('unread') || hasBlueDot || hasBoldText) return true;
+                            return false;
+                        }) || null;
+                    }, myUsername);
+                } catch (err) {
+                    this.logger.warn(`Failed evaluating unread threads: ${err}`);
                 }
 
                 const unreadThreadEl = unreadThread ? unreadThread.asElement() : null;
                 if (unreadThreadEl) {
-                    let responseSent = false;
                     this.logger.info("Found unread DM thread! Opening...");
                     await unreadThreadEl.evaluate((el) => (el as HTMLElement).click());
                     await delay(3000);
+                    lastInteractionTime = Date.now();
+                    hasProcessedAny = true;
+                }
 
-                    // Scrape conversation
-                    // Messages are in div[role="row"] usually? or generic container.
-                    // We want the LAST message that is NOT from us.
-                    // Improve scraping to detect sender
+                const isThreadOpen = this.page.url().includes("/direct/t/");
 
-                    // 1. Detect conversation partner username from Header
-                    // Header usually contains h1 or h2 with username
-                    // 1. Detect conversation partner username from Header
-                    // Header usually contains h1 or h2 with username
-                    // PROMPTING FIX: Verify we are talking to the right person
-                    const partnerUsername = await this.page.evaluate(() => {
-                        const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
-                        // Fallback to "Message [Username]..." placeholder
-                        if (!header) {
-                            const textBox = document.querySelector('div[role="textbox"]');
-                            const label = textBox?.getAttribute('aria-label'); // "Message name..."
-                            if (label) return label.replace('Message', '').trim();
-                        }
-                        return header?.textContent?.trim() || "User";
-                    });
-
-                    // 2. Scrape last 10 messages for context
-                    const history = await this.page.evaluate(() => {
-                        const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
-                        if (messages.length === 0) return [];
-
-                        const historyData = [];
-                        // Iterate backwards, up to 10 valid text bubbles
-                        let count = 0;
-                        for (let i = messages.length - 1; i >= 0 && count < 10; i--) {
-                            const node = messages[i];
-                            const text = node.textContent?.trim() || "";
-                            if (!text) continue;
-
-                            let isMine = false;
-                            let el: HTMLElement | null = node as HTMLElement;
-                            let depth = 0;
-                            while (el && depth < 6) {
-                                const style = window.getComputedStyle(el);
-                                const bg = style.backgroundColor;
-                                if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
-                                    isMine = true;
-                                    break;
-                                }
-                                if ((style.alignSelf === 'flex-end' || style.alignItems === 'flex-end') && !isMine) {
-                                    // isMine = true; // Use cautiously
-                                }
-                                el = el.parentElement;
-                                depth++;
-                            }
-                            if (!isMine) {
-                                const rect = node.getBoundingClientRect();
-                                const viewWidth = window.innerWidth;
-                                if (rect.left > viewWidth * 0.5) isMine = true;
-                            }
-
-                            historyData.unshift({ text, isMine }); // Add to front to maintain chronological order
-                            count++;
-                        }
-                        return historyData;
-                    });
-
-                    const lastMessage = history[history.length - 1]; // Use local variable, NOT lastMessageData which is removed
-                    // Check if *last* message is ours (Loop Protection)
-                    if (lastMessage && lastMessage.isMine) {
-                        this.logger.info(`Last message detected from ME: "${lastMessage.text.substring(0, 30)}...". Skipping reply.`);
-                    } else if (lastMessage) {
-                        this.logger.info(`Conversation Context (${history.length} msgs). Last from Partner: "${lastMessage.text.substring(0, 30)}..."`);
-
-                        const lastMessageText = lastMessage.text;
-                        this.logger.info(`Last message detected: "${lastMessageText.substring(0, 50)}..."`);
-
-                        // Generate Response
-                        const schema = getInstagramDMResponseSchema();
-
-
-                        // 3. Retrieve Facts from DB
-                        let existingFacts: string[] = [];
-                        if (partnerUsername) {
-                            try {
-                                const contact = await Contact.findOne({ username: partnerUsername });
-                                if (contact && contact.facts) existingFacts = contact.facts;
-                            } catch (err) {
-                                this.logger.warn(`Failed to fetch contact info: ${err}`);
-                            }
-                        }
-
-                        // 4. Format History
-                        const historyText = history.map(h => h.isMine ? `[Me]: ${h.text}` : `[Him]: ${h.text}`).join('\n');
-
-                        // Construct Personalized Prompt
-                        const charName = this.character?.aiPersona?.name || this.character?.name || "User";
-                        const charBio = (this.character?.bio || []).join(" ");
-                        const charLore = (this.character?.lore || []).join(" ");
-                        const charTopics = (this.character?.topics || []).join(", ");
-                        const charAdjectives = (this.character?.adjectives || []).join(", ");
-                        const charStyle = (this.character?.style?.all || []).join(" ");
-
-                        // NEW: Explicit Goal & Location from JSON
-                        const charGoal = this.character?.goal || "Engage naturally.";
-                        const charLocation = this.character?.location || "Unknown";
-
-                        const prompt = `You are ${charName} on Instagram.
-                    
-                    Your Bio: ${charBio}
-                    Your Lore/Backstory: ${charLore}
-                    Your Interests: ${charTopics}
-                    Your Style/Tone: ${charAdjectives} ${charStyle}
-                    Your Location: ${charLocation}
-                    
-                    Your Main Goal: ${charGoal}
-                    
-                    You are replying to a DM thread with user: "${partnerUsername}".
-
-                    [KNOWN FACTS ABOUT USER]
-                    ${existingFacts.length > 0 ? existingFacts.map(f => `- ${f}`).join('\n') : "(None yet)"}
-
-                    [CONVERSATION HISTORY (Last 10 messages)]
-                    ${historyText}
-
-                    Language Configuration:
-                    - You speak: [${this.languages.join(', ')}]
-                    - Default Language: "${this.defaultLanguage}"
-                    
-                    Task: Generate a natural response as ${charName}.
-                    Guidelines:
-                    - Detect the language of the incoming message.
-                    - If it matches one of your spoken languages above, reply in that language.
-                    - Otherwise, reply in your Default Language (${this.defaultLanguage}).
-                    - Keep it concise (1-2 sentences usually).
-                    - Match your specific tone and style defined above.
-                    - If the message is "hi" or generic, reply in character.
-                    - If it's spam, ignore it (return empty string or "IGNORE").
-                    - Do not be overly helpful assistant-like; be the character.
-                    - IMPORTANT: Extract any NEW permanent facts about the user (e.g. name, age, city, pets, likes, relationships) from the conversation. Return them in the 'memory_updates' field.
-                    `;
-
-                        const result = await runAgent(schema, prompt);
-                        // result is typically an array of objects based on schema
-                        let responseText = result[0]?.response;
-                        let newFacts = result[0]?.memory_updates || [];
-
-                        // 5. Save New Facts
-                        if (newFacts.length > 0 && partnerUsername) {
-                            try {
-                                await Contact.findOneAndUpdate(
-                                    { username: partnerUsername },
-                                    {
-                                        $addToSet: { facts: { $each: newFacts } },
-                                        $set: { lastInteraction: new Date() }
-                                    },
-                                    { upsert: true, new: true }
-                                );
-                                this.logger.info(`Saved ${newFacts.length} new facts for ${partnerUsername}: ${newFacts.join(', ')}`);
-                            } catch (err) {
-                                this.logger.error(`Failed to save facts: ${err}`);
-                            }
-                        }
-
-                        if (responseText && responseText !== "IGNORE") {
-                            this.logger.info(`Generated response: "${responseText}"`);
-                            await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
-                            await delay(1000);
-
-                            // Send
-                            const sendBtn = await this.page.evaluateHandle(() => {
-                                const buttons = Array.from(document.querySelectorAll('button'));
-                                return buttons.find(b => b.textContent === 'Send') || null;
-                            });
-
-                            const sendBtnEl = sendBtn.asElement();
-                            if (sendBtnEl) {
-                                await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
-                                this.logger.info("DM Sent.");
-                                activityTracker.trackAction('dms');
-                            } else {
-                                // Enter key fallback
-                                await this.page.keyboard.press('Enter');
-                                this.logger.info("DM Sent (via Enter key).");
-                                activityTracker.trackAction('dms');
-                            }
-
-                            // RATE LIMITING: Wait 10s between DMs to avoid 429s (Gemini has RPM limits)
-                            this.logger.info("Waiting 10s before next DM to respect rate limits...");
-                            await delay(10000);
-
-                            responseSent = true;
-                            processedCount++;
-                        }
-                    }
-                    // Random delay between messages in batch
-                    if (responseSent) {
-                        await delay(3000 + Math.random() * 5000);
+                if (!unreadThreadEl && !isThreadOpen) {
+                    if (hasProcessedAny && (Date.now() - lastInteractionTime < sessionTimeoutMs)) {
+                        await delay(5000); // Poll every 5s
+                        continue;
                     } else {
-                        // Quick settle delay if we just inspected and skipped
-                        await delay(1000);
+                        this.logger.info("No active conversation. Finished DM check.");
+                        break;
                     }
-                } else {
-                    this.logger.info("No unread DMs found. Batch finished.");
-                    break;
+                }
+
+                if (this.page && !this.page.isClosed()) {
+                    const responded = await this.respondToCurrentOpenChat(activityTracker, dmsPerHour);
+                    if (responded) {
+                        processedCount++;
+                        lastInteractionTime = Date.now();
+                        hasProcessedAny = true;
+                    } else {
+                        if (hasProcessedAny && (Date.now() - lastInteractionTime < sessionTimeoutMs)) {
+                            await delay(3000); // Check again in 3s
+                            continue;
+                        } else if (!hasProcessedAny) {
+                            this.logger.info("No new unread messages in open thread.");
+                            break;
+                        } else {
+                            this.logger.info("Active conversation session timed out.");
+                            break;
+                        }
+                    }
                 }
             } // End While Loop
 

@@ -48,7 +48,7 @@ export async function runAgent(
 
   const googleAI = new GoogleGenerativeAI(geminiApiKey);
   const model = googleAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash-lite",
     generationConfig,
   });
 

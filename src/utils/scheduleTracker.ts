@@ -4,6 +4,7 @@ import path from 'path';
 interface ScheduleLog {
     [accountId: string]: {
         nextActiveTime: number; // Timestamp of when the bot can become active again
+        lastDMCheckTime?: number; // Timestamp of when the last DM check occurred
     }
 }
 
@@ -74,6 +75,23 @@ export class ScheduleTracker {
             this.data[this.accountId] = { nextActiveTime: 0 };
         }
         this.data[this.accountId].nextActiveTime = timestamp;
+        this.saveData();
+    }
+
+    public getLastDMCheckTime(): number {
+        this.data = this.loadData();
+        if (!this.data[this.accountId]) {
+            return 0;
+        }
+        return this.data[this.accountId].lastDMCheckTime || 0;
+    }
+
+    public setLastDMCheckTime(timestamp: number) {
+        this.data = this.loadData();
+        if (!this.data[this.accountId]) {
+            this.data[this.accountId] = { nextActiveTime: 0 };
+        }
+        this.data[this.accountId].lastDMCheckTime = timestamp;
         this.saveData();
     }
 
