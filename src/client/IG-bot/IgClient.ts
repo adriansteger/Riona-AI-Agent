@@ -85,11 +85,10 @@ export class IgClient {
         } catch (e) { return false; }
     }
 
-    // Helper for robust navigation
-    private async gotoWithRetry(url: string, options: any = {}, retries = 3) {
+    private async gotoWithRetry(url: string, options: any = {}, retries = 3, page: puppeteer.Page | null = this.page) {
         for (let i = 0; i < retries; i++) {
             try {
-                await this.page?.goto(url, { timeout: 60000, ...options });
+                await page?.goto(url, { timeout: 60000, ...options });
                 return;
             } catch (e: any) {
                 this.logger.warn(`Navigation attempt ${i + 1}/${retries} failed: ${e.message}`);
@@ -118,19 +117,27 @@ export class IgClient {
         try {
             await this.page.evaluate(() => 1);
         } catch (err: any) {
-            if (err.message?.includes('detached') || err.message?.includes('closed') || err.message?.includes('destroyed')) {
-                this.logger.warn(`Detected detached frame or destroyed context on page. Recreating page...`);
+            const isCrashedOrClosed = err.message?.includes('crashed') || err.message?.includes('closed') || this.page.isClosed();
+            
+            if (isCrashedOrClosed) {
+                this.logger.warn(`Detected crashed or closed page: ${err.message}. Recreating page...`);
                 try {
-                    await this.page.close().catch(() => {});
+                    if (!this.page.isClosed()) {
+                        await this.page.close().catch(() => {});
+                    }
                 } catch {}
                 this.page = await this.browser.newPage();
                 const userAgent = new UserAgent({ deviceCategory: "desktop" });
                 await this.page.setUserAgent(userAgent.toString());
                 await this.page.setViewport({ width: 1280, height: 800 });
                 this.page.setDefaultNavigationTimeout(60000);
+            } else {
+                this.logger.warn(`Page evaluate failed (likely transient navigation): ${err.message}. Waiting 2s for stabilization...`);
+                await delay(2000);
             }
         }
     }
+
 
     async init() {
         if (this.isConnected()) {
@@ -1269,9 +1276,8 @@ export class IgClient {
 
 
 
-    async checkAndAcceptDMRequests(limits?: { dmsPerHour?: number }) {
-        await this.ensurePageActive();
-        if (!this.page) return;
+    async checkAndAcceptDMRequests(page: puppeteer.Page, limits?: { dmsPerHour?: number }) {
+        if (!page) return;
 
         const dmsPerHour = limits?.dmsPerHour || 5;
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
@@ -1284,18 +1290,18 @@ export class IgClient {
 
         try {
             // Enable Console Logging for this method
-            this.page.on('console', consoleHandler);
+            page.on('console', consoleHandler);
 
             this.logger.info("Checking for DM Requests...");
-            await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+            await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" }, 3, page);
             await delay(3000);
 
             // DEBUG: Dump Page Structure to identify selectors
-            if (!this.page || this.page.isClosed()) {
-                this.logger.warn("Page is closed or missing. Aborting requests loop.");
+            if (page.isClosed()) {
+                this.logger.warn("Page is closed. Aborting requests loop.");
                 return;
             }
-            await this.page.evaluate(() => {
+            await page.evaluate(() => {
                 console.log("[REQ DEBUG] Analysis Started.");
                 const allDivs = Array.from(document.querySelectorAll('div, a, button'));
                 let candidates = 0;
@@ -1321,33 +1327,33 @@ export class IgClient {
 
             // DEBUG: Screenshot
             try {
-                if (this.page && !this.page.isClosed()) {
+                if (!page.isClosed()) {
                     const screenshotPath = path.resolve('screenshots', `requests_debug_${Date.now()}.png`);
                     await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
-                    await this.page.screenshot({ path: screenshotPath });
+                    await page.screenshot({ path: screenshotPath });
                     this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
                 }
             } catch (e) { /* ignore */ }
 
-            if (!this.page || this.page.isClosed()) {
-                this.logger.warn("Page is closed or missing. Aborting requests loop.");
+            if (page.isClosed()) {
+                this.logger.warn("Page is closed. Aborting requests loop.");
                 return;
             }
 
             // Strategy 1: Specific Listbox Buttons
-            let requests: ElementHandle<Element>[] = await this.page.$$('div[role="listbox"] div[role="button"]');
+            let requests: ElementHandle<Element>[] = await page.$$('div[role="listbox"] div[role="button"]');
 
             // Strategy 2: Broad "listitem" or "row"
-            if (requests.length === 0 && this.page && !this.page.isClosed()) {
+            if (requests.length === 0 && !page.isClosed()) {
                 this.logger.info("Strategy 1 (Listbox) failed. Trying Strategy 2 (Broad Rows)...");
-                requests = await this.page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
+                requests = await page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
             }
 
             // Strategy 3: Text Search for "Request" context (Blind Attempt)
-            if (requests.length === 0 && this.page && !this.page.isClosed()) {
+            if (requests.length === 0 && !page.isClosed()) {
                 this.logger.info("Strategy 2 failed. Trying Strategy 3 (Any wide button)...");
                 // Filter for elements that look like user rows
-                requests = await this.page.evaluateHandle(() => {
+                requests = await page.evaluateHandle(() => {
                     const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
                     return candidates.filter(c => {
                         const r = c.getBoundingClientRect();
@@ -1374,13 +1380,13 @@ export class IgClient {
 
             const maxToAccept = Math.min(requests.length, 3);
             for (let i = 0; i < maxToAccept; i++) {
-                if (!this.page || this.page.isClosed()) {
-                    this.logger.warn("Page is closed or missing. Aborting requests loop.");
+                if (page.isClosed()) {
+                    this.logger.warn("Page is closed. Aborting requests loop.");
                     break;
                 }
 
                 // Re-fetch using SHAPE STRATEGY (The only one that works)
-                const currentRequests = await this.page.evaluateHandle(() => {
+                const currentRequests = await page.evaluateHandle(() => {
                     const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
                     return candidates.filter(c => {
                         const r = c.getBoundingClientRect();
@@ -1417,13 +1423,13 @@ export class IgClient {
 
                 await delay(3000);
 
-                if (!this.page || this.page.isClosed()) {
+                if (page.isClosed()) {
                     this.logger.warn("Page was closed during interaction. Aborting loop.");
                     break;
                 }
 
                 // Find "Accept" button
-                const acceptBtn = await this.page.evaluateHandle(() => {
+                const acceptBtn = await page.evaluateHandle(() => {
                     const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
                     return buttons.find(b => (b.textContent?.trim() === 'Accept' || (b as HTMLElement).innerText?.trim() === 'Accept')) || null;
                 });
@@ -1433,13 +1439,13 @@ export class IgClient {
                     await (acceptBtnEl as ElementHandle<Element>).click();
                     await delay(3000);
 
-                    if (!this.page || this.page.isClosed()) {
+                    if (page.isClosed()) {
                         this.logger.warn("Page was closed after clicking Accept.");
                         break;
                     }
 
                     // Handle "Move to Primary" dialog if it appears
-                    const primaryBtn = await this.page.evaluateHandle(() => {
+                    const primaryBtn = await page.evaluateHandle(() => {
                         const buttons = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button'));
                         return buttons.find(b => (b.textContent?.trim() === 'Primary' || (b as HTMLElement).innerText?.trim() === 'Primary')) || null;
                     });
@@ -1453,30 +1459,30 @@ export class IgClient {
                     this.logger.info(`Accepted DM request ${i + 1}/${maxToAccept}`);
 
                     // Respond immediately to the newly accepted chat!
-                    await this.respondToCurrentOpenChat(activityTracker, dmsPerHour);
+                    await this.respondToCurrentOpenChat(page, activityTracker, dmsPerHour);
                 } else {
                     this.logger.warn(`Could not find Accept button for request ${i + 1}.`);
                 }
 
-                if (!this.page || this.page.isClosed()) {
+                if (page.isClosed()) {
                     this.logger.warn("Page was closed. Aborting requests loop.");
                     break;
                 }
 
-                await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" });
+                await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" }, 3, page);
                 await delay(3000);
             }
         } catch (e) {
             this.logger.error(`Error accepting DM requests: ${e}`);
         } finally {
-            if (this.page && !this.page.isClosed()) {
-                this.page.off('console', consoleHandler);
+            if (!page.isClosed()) {
+                page.off('console', consoleHandler);
             }
         }
     }
 
-    private async respondToCurrentOpenChat(activityTracker: ActivityTracker, dmsPerHour: number): Promise<boolean> {
-        if (!this.page || this.page.isClosed()) return false;
+    private async respondToCurrentOpenChat(page: puppeteer.Page, activityTracker: ActivityTracker, dmsPerHour: number): Promise<boolean> {
+        if (!page || page.isClosed()) return false;
 
         // Check rate limits
         if (!activityTracker.canPerformAction('dms', dmsPerHour)) {
@@ -1486,7 +1492,7 @@ export class IgClient {
 
         try {
             // 1. Detect conversation partner username from Header
-            const partnerUsername = await this.page.evaluate(() => {
+            const partnerUsername = await page.evaluate(() => {
                 const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
                 if (!header) {
                     const textBox = document.querySelector('div[role="textbox"]');
@@ -1497,7 +1503,7 @@ export class IgClient {
             });
 
             // 2. Scrape last 10 messages for context
-            const history = await this.page.evaluate(() => {
+            const history = await page.evaluate(() => {
                 const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
                 if (messages.length === 0) return [];
 
@@ -1622,10 +1628,10 @@ export class IgClient {
 
                 if (responseText && responseText !== "IGNORE") {
                     this.logger.info(`Generated response: "${responseText}"`);
-                    await this.page.type('div[role="textbox"][contenteditable="true"]', responseText);
+                    await page.type('div[role="textbox"][contenteditable="true"]', responseText);
                     await delay(1000);
 
-                    const sendBtn = await this.page.evaluateHandle(() => {
+                    const sendBtn = await page.evaluateHandle(() => {
                         const buttons = Array.from(document.querySelectorAll('button'));
                         return buttons.find(b => b.textContent === 'Send') || null;
                     });
@@ -1637,7 +1643,7 @@ export class IgClient {
                         activityTracker.trackAction('dms');
                         this.dmsProcessedThisSession = true;
                     } else {
-                        await this.page.keyboard.press('Enter');
+                        await page.keyboard.press('Enter');
                         this.logger.info("DM Sent (via Enter key).");
                         activityTracker.trackAction('dms');
                         this.dmsProcessedThisSession = true;
@@ -1660,9 +1666,6 @@ export class IgClient {
 
         this.dmsProcessedThisSession = false;
 
-        // --- DM REQUESTS CHECK ---
-        await this.checkAndAcceptDMRequests(limits);
-
         const dmsPerHour = limits?.dmsPerHour || 5;
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
@@ -1672,7 +1675,28 @@ export class IgClient {
             return;
         }
 
-        // Listener handler
+        // --- PARALLEL EXECUTION ---
+        // Run requests check in parallel on a separate page
+        let requestsPromise = Promise.resolve();
+        let requestsPage: puppeteer.Page | null = null;
+        
+        if (this.browser) {
+            try {
+                requestsPage = await this.browser.newPage();
+                const userAgent = new UserAgent({ deviceCategory: "desktop" });
+                await requestsPage.setUserAgent(userAgent.toString());
+                await requestsPage.setViewport({ width: 1280, height: 800 });
+                requestsPage.setDefaultNavigationTimeout(60000);
+                
+                requestsPromise = this.checkAndAcceptDMRequests(requestsPage, limits).catch(err => {
+                    this.logger.error(`Error in parallel requests check: ${err}`);
+                });
+            } catch (err) {
+                this.logger.error(`Failed to create page for parallel requests check: ${err}`);
+            }
+        }
+
+        // Listener handler for the main inbox page
         const consoleHandler = (msg: any) => {
             if (msg.text().includes('[DM DEBUG]')) {
                 console.log(`BROWSER CONS: ${msg.text()}`);
@@ -1681,7 +1705,6 @@ export class IgClient {
 
         try {
             this.logger.info("Checking for unread Direct Messages...");
-            // Listen for browser console logs (DEBUG)
             this.page.on('console', consoleHandler);
 
             const initialUrl = this.page.url();
@@ -1787,7 +1810,7 @@ export class IgClient {
                 }
 
                 if (this.page && !this.page.isClosed()) {
-                    const responded = await this.respondToCurrentOpenChat(activityTracker, dmsPerHour);
+                    const responded = await this.respondToCurrentOpenChat(this.page, activityTracker, dmsPerHour);
                     if (responded) {
                         processedCount++;
                         lastInteractionTime = Date.now();
@@ -1810,7 +1833,13 @@ export class IgClient {
         } catch (e) {
             this.logger.error(`Error checking/responding to DMs: ${e}`);
         } finally {
-            this.page.off('console', consoleHandler);
+            await requestsPromise;
+            if (requestsPage) {
+                await requestsPage.close().catch(() => {});
+            }
+            if (this.page && !this.page.isClosed()) {
+                this.page.off('console', consoleHandler);
+            }
         }
     }
 

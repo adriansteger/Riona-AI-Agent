@@ -84,6 +84,15 @@ app.get('*', (_req, res) => {
 // Registry for active persistent sessions
 const activeSessions = new Map<string, IgClient>();
 
+// Global session limiter to enforce MAX_CONCURRENT_SESSIONS across independent loops
+const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
+const sessionLimit = pLimit(maxConcurrent);
+
+// Concurrency limiter for heavy interaction tasks (likes, comments, etc.) to prevent blocking DM checks
+const maxConcurrentInteractions = parseInt(process.env.MAX_CONCURRENT_INTERACTIONS || '1', 10);
+const interactionLimit = pLimit(maxConcurrentInteractions);
+
+
 const processAccount = async (account: any, emailService?: EmailService) => {
   // Stagger start slightly (0-5s) to avoid CPU spikes if multiple launch at once
   const stagger = Math.floor(Math.random() * 5000);
@@ -164,6 +173,27 @@ const processAccount = async (account: any, emailService?: EmailService) => {
       }
     }
 
+    // If active cycle is due, check if the heavy interaction slot is available
+    if (!isDMOnlyRun && Date.now() >= nextActiveTime) {
+      if (interactionLimit.activeCount >= interactionLimit.concurrency) {
+        accountLogger.info(`Active cycle is due, but the heavy interaction slot is busy (${interactionLimit.activeCount}/${interactionLimit.concurrency} active).`);
+        if (behavior.enableAutoDMs === true) {
+          const lastDMCheck = scheduleTracker.getLastDMCheckTime();
+          const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
+          if (Date.now() - lastDMCheck >= dmIntervalMs) {
+            isDMOnlyRun = true;
+            accountLogger.info(`Executing a quick, headless DM-only check instead of full interaction cycle.`);
+          }
+        }
+
+        if (!isDMOnlyRun) {
+          accountLogger.info(`Postponing active cycle. Retrying in next loop iteration.`);
+          return;
+        }
+      }
+    }
+
+
     const activityTracker = new ActivityTracker(trackerId);
 
     // --- LIKES PER SESSION RANDOMIZATION ---
@@ -224,108 +254,120 @@ const processAccount = async (account: any, emailService?: EmailService) => {
       return;
     }
 
-    // --- REUSE OR CREATE CLIENT ---
-    let igClient = activeSessions.get(account.id);
-
-    // If client exists but disconnected, clear it
-    if (igClient && !igClient.isConnected()) {
-      activeSessions.delete(account.id);
-      igClient = undefined;
-    }
-
-    if (!igClient) {
-      // Initialize New Client
-      igClient = new IgClient({
-        username: account.username,
-        password: account.password,
-        userDataDir: account.userDataDir,
-        proxy: account.proxy,
-        languages: account.settings?.languages,
-        defaultLanguage: account.settings?.defaultLanguage,
-        headless: isDMOnlyRun ? (account.settings?.headless !== false) : (process.env.HEADLESS === 'true' || account.settings?.headless)
-      }, accountLogger, character, emailService);
-
-      activeSessions.set(account.id, igClient);
-    } else {
-      accountLogger.info("Reusing active browser session.");
-    }
-
+    // --- REUSE OR CREATE CLIENT AND RUN INTERACTION ---
     try {
-      await igClient.init(); // Idempotent now
+      const runSession = async () => {
+        let igClient = activeSessions.get(account.id);
 
-      accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
-      accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
-
-      const hashtags = account.settings?.hashtags || [];
-      const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
-
-      // Check for Auto DMs if enabled in settings
-      if (behavior.enableAutoDMs) {
-        accountLogger.info("Checking for DMs (enabled in settings)...");
-        await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
-      }
-
-      // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
-      let actionsCompleted = 0;
-      if (!isDMOnlyRun) {
-        const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
-
-        if (useHashtags) {
-          accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-          actionsCompleted = await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
-          
-          if (actionsCompleted === 0) {
-            accountLogger.warn("Hashtag interaction completed with 0 actions. Attempting fallback FEED strategy...");
-            actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
-          }
-        } else {
-          accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-          actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
-        }
-      }
-
-      // Store actionsCompleted on the client instance so the finally block can access it
-      (igClient as any).actionsCompletedThisSession = actionsCompleted;
-
-    } catch (err) {
-      throw err; // Re-throw to be caught by outer catch for logging
-    } finally {
-      // ALWAYS CLOSE after session finishes to save RAM, as rest periods are typically long (45m+)
-      // This satisfies the user's request: "when the account is resting the associated browser window can be closed"
-      const existingClient = activeSessions.get(account.id);
-      let actionsCompleted = 0;
-      let dmsProcessed = false;
-      if (existingClient) {
-          actionsCompleted = (existingClient as any).actionsCompletedThisSession || 0;
-          dmsProcessed = (existingClient as any).dmsProcessedThisSession || false;
-          accountLogger.info(`Closing session for ${account.id} before rest period.`);
-          await existingClient.close();
+        // If client exists but disconnected, clear it
+        if (igClient && !igClient.isConnected()) {
           activeSessions.delete(account.id);
-      }
-
-      // Update the Rest/DM Cycles
-      if (isDMOnlyRun) {
-        const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 5);
-        const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
-        scheduleTracker.setLastDMCheckTime(Date.now() + (nextCheckMinutes * 60000) - dmIntervalMs);
-        accountLogger.info(`DM-only check completed. Next DM check available in ~${nextCheckMinutes} minutes.`);
-      } else {
-        // Update the Rest Cycle
-        // After finishing interactions and checks, the bot rests
-        // If we did 0 actions (meaning the session had some early failures or skipped entirely), rest for a very short 5-minute retry delay
-        let restDelayMs;
-        if (actionsCompleted === 0) {
-          accountLogger.warn("Performed 0 interactions in this session. Scheduling a short retry delay of 5 minutes instead of a full rest cycle.");
-          restDelayMs = 5 * 60 * 1000;
-        } else {
-          restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
+          igClient = undefined;
         }
-        scheduleTracker.setNextActiveTime(Date.now() + restDelayMs);
-        accountLogger.info(`Account rests. Next active cycle set in ~${Math.round(restDelayMs / 60000)} minutes.`);
-      }
 
-      accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
+        if (!igClient) {
+          // Initialize New Client
+          igClient = new IgClient({
+            username: account.username,
+            password: account.password,
+            userDataDir: account.userDataDir,
+            proxy: account.proxy,
+            languages: account.settings?.languages,
+            defaultLanguage: account.settings?.defaultLanguage,
+            headless: isDMOnlyRun ? (account.settings?.headless !== false) : (process.env.HEADLESS === 'true' || account.settings?.headless)
+          }, accountLogger, character, emailService);
+
+          activeSessions.set(account.id, igClient);
+        } else {
+          accountLogger.info("Reusing active browser session.");
+        }
+
+        try {
+          await igClient.init(); // Idempotent now
+
+          accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
+          accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
+
+          const hashtags = account.settings?.hashtags || [];
+          const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
+
+          // Check for Auto DMs if enabled in settings
+          if (behavior.enableAutoDMs) {
+            accountLogger.info("Checking for DMs (enabled in settings)...");
+            await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
+          }
+
+          // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
+          let actionsCompleted = 0;
+          if (!isDMOnlyRun) {
+            const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
+
+            if (useHashtags) {
+              accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
+              actionsCompleted = await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
+              
+              if (actionsCompleted === 0) {
+                accountLogger.warn("Hashtag interaction completed with 0 actions. Attempting fallback FEED strategy...");
+                actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
+              }
+            } else {
+              accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
+              actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
+            }
+          }
+
+          // Store actionsCompleted on the client instance so the finally block can access it
+          (igClient as any).actionsCompletedThisSession = actionsCompleted;
+
+        } catch (err) {
+          throw err;
+        } finally {
+          // ALWAYS CLOSE after session finishes to save RAM
+          const existingClient = activeSessions.get(account.id);
+          let actionsCompleted = 0;
+          let dmsProcessed = false;
+          if (existingClient) {
+              actionsCompleted = (existingClient as any).actionsCompletedThisSession || 0;
+              dmsProcessed = (existingClient as any).dmsProcessedThisSession || false;
+              accountLogger.info(`Closing session for ${account.id} before rest period.`);
+              await existingClient.close();
+              activeSessions.delete(account.id);
+          }
+
+          // Update the Rest/DM Cycles
+          if (isDMOnlyRun) {
+            const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 5);
+            const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 5) * 60 * 1000;
+            scheduleTracker.setLastDMCheckTime(Date.now() + (nextCheckMinutes * 60000) - dmIntervalMs);
+            accountLogger.info(`DM-only check completed. Next DM check available in ~${nextCheckMinutes} minutes.`);
+          } else {
+            // Update the Rest Cycle
+            let restDelayMs;
+            if (actionsCompleted === 0) {
+              accountLogger.warn("Performed 0 interactions in this session. Scheduling a short retry delay of 5 minutes instead of a full rest cycle.");
+              restDelayMs = 5 * 60 * 1000;
+            } else {
+              restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
+            }
+            scheduleTracker.setNextActiveTime(Date.now() + restDelayMs);
+            accountLogger.info(`Account rests. Next active cycle set in ~${Math.round(restDelayMs / 60000)} minutes.`);
+          }
+
+          accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
+        }
+      };
+
+      if (isDMOnlyRun) {
+        await sessionLimit(runSession);
+      } else {
+        await interactionLimit(async () => {
+          await sessionLimit(runSession);
+        });
+      }
+    } catch (err) {
+      throw err;
     }
+
 
   } catch (error: any) {
     accountLogger.error(`Error processing account ${account.id}: ${error}`);
@@ -339,9 +381,23 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 // Global persisted Alert Email Service to prevent handle leaks
 let globalAlertEmailService: EmailService | undefined;
 
+const startAccountLoop = async (account: any, emailService?: EmailService) => {
+  const accountLogger = createAccountLogger(account.id);
+  accountLogger.info(`Starting independent loop for account: ${account.id} (${account.username})`);
+  while (true) {
+    try {
+      await processAccount(account, emailService);
+    } catch (err) {
+      accountLogger.error(`Error in loop for account ${account.id}: ${err}`);
+    }
+    // Check schedule again every 30 seconds
+    await new Promise(resolve => setTimeout(resolve, 30000));
+  }
+};
+
 // Define runInstagram
 const runInstagram = async () => {
-  logger.info("Starting Multi-Account Instagram Bot...");
+  logger.info("Starting Multi-Account Instagram Bot (Independent Loops)...");
 
   // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
   const accounts: any[] = accountConfig;
@@ -383,41 +439,25 @@ const runInstagram = async () => {
     }
   }
 
-  // Configurable Concurrency
-  // Default to 5 if not set
-  const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
   logger.info(`Running with MAX_CONCURRENT_SESSIONS: ${maxConcurrent}`);
 
-  const limit = pLimit(maxConcurrent);
-
-  // Create promises for all enabled accounts
-  const promises = enabledAccounts.map(account => limit(() => processAccount(account, globalAlertEmailService)));
-
-  // Wait for all to finish
-  await Promise.all(promises);
-
-  logger.info("All accounts processed.");
+  // Start independent loops for all enabled accounts
+  enabledAccounts.forEach(account => {
+    startAccountLoop(account, globalAlertEmailService);
+  });
 };
 
 const runAgents = async () => {
+  // Start the Instagram loops once (they run indefinitely in the background)
+  await runInstagram();
+
+  // Run the Job Bot loop indefinitely
   while (true) {
-    logger.info("Starting Instagram agent iteration...");
-    await runInstagram();
-    logger.info("Instagram agent iteration finished.");
-
-    // logger.info("Starting Twitter agent...");
-    // await twitterMain();
-    // logger.info("Twitter agent finished.");
-
-    // logger.info("Starting GitHub agent...");
-    // await githubMain();
-    // logger.info("GitHub agent finished.");
-
     logger.info("Starting Job Bot...");
     await runJobBot();
     logger.info("Job Bot finished.");
 
-    // Wait for 30 seconds before next iteration
+    // Wait for 30 seconds before checking Job Bot again
     await new Promise((resolve) => setTimeout(resolve, 30000));
   }
 };

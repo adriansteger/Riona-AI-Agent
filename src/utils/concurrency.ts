@@ -40,5 +40,18 @@ export function pLimit(concurrency: number) {
         });
     };
 
-    return enqueue;
+    Object.defineProperties(enqueue, {
+        activeCount: {
+            get: () => activeCount
+        },
+        pendingCount: {
+            get: () => queue.length
+        },
+        concurrency: {
+            get: () => concurrency
+        }
+    });
+
+    return enqueue as any;
 }
+
