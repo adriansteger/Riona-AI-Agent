@@ -176,7 +176,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
     // If active cycle is due, check if the heavy interaction slot is available
     if (!isDMOnlyRun && Date.now() >= nextActiveTime) {
       if (interactionLimit.activeCount >= interactionLimit.concurrency) {
-        accountLogger.info(`Active cycle is due, but the heavy interaction slot is busy (${interactionLimit.activeCount}/${interactionLimit.concurrency} active).`);
+        accountLogger.debug(`Active cycle is due, but the heavy interaction slot is busy (${interactionLimit.activeCount}/${interactionLimit.concurrency} active).`);
         if (behavior.enableAutoDMs === true) {
           const lastDMCheck = scheduleTracker.getLastDMCheckTime();
           const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
@@ -187,7 +187,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
         }
 
         if (!isDMOnlyRun) {
-          accountLogger.info(`Postponing active cycle. Retrying in next loop iteration.`);
+          accountLogger.debug(`Postponing active cycle. Retrying in next loop iteration.`);
           return;
         }
       }

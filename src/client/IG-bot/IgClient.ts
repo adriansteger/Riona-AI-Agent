@@ -1682,25 +1682,14 @@ export class IgClient {
             return;
         }
 
-        // --- PARALLEL EXECUTION ---
-        // Run requests check in parallel on a separate page
-        let requestsPromise = Promise.resolve();
-        let requestsPage: puppeteer.Page | null = null;
-        
-        if (this.browser) {
-            try {
-                requestsPage = await this.browser.newPage();
-                const userAgent = new UserAgent({ deviceCategory: "desktop" });
-                await requestsPage.setUserAgent(userAgent.toString());
-                await requestsPage.setViewport({ width: 1280, height: 800 });
-                requestsPage.setDefaultNavigationTimeout(60000);
-                
-                requestsPromise = this.checkAndAcceptDMRequests(requestsPage, limits).catch(err => {
-                    this.logger.error(`Error in parallel requests check: ${err}`);
-                });
-            } catch (err) {
-                this.logger.error(`Failed to create page for parallel requests check: ${err}`);
+        // --- SEQUENTIAL EXECUTION ---
+        // Run requests check sequentially on the main page to avoid parallel navigation/rendering crashes
+        try {
+            if (this.page && !this.page.isClosed()) {
+                await this.checkAndAcceptDMRequests(this.page, limits);
             }
+        } catch (err) {
+            this.logger.error(`Error checking DM requests: ${err}`);
         }
 
         // Listener handler for the main inbox page
@@ -1840,10 +1829,6 @@ export class IgClient {
         } catch (e) {
             this.logger.error(`Error checking/responding to DMs: ${e}`);
         } finally {
-            await requestsPromise;
-            if (requestsPage) {
-                await requestsPage.close().catch(() => {});
-            }
             if (this.page && !this.page.isClosed()) {
                 this.page.off('console', consoleHandler);
             }
