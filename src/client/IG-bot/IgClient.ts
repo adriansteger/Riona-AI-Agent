@@ -88,6 +88,10 @@ export class IgClient {
     private async gotoWithRetry(url: string, options: any = {}, retries = 3, page: puppeteer.Page | null = this.page) {
         for (let i = 0; i < retries; i++) {
             try {
+                if (page === this.page) {
+                    await this.ensurePageActive();
+                    page = this.page;
+                }
                 await page?.goto(url, { timeout: 60000, ...options });
                 return;
             } catch (e: any) {
@@ -98,18 +102,193 @@ export class IgClient {
         }
     }
 
+    private async configurePage(page: puppeteer.Page) {
+        // 1. Spoof visibility
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+        });
+
+        // 2. Default navigation timeout
+        page.setDefaultNavigationTimeout(60000);
+
+        // 3. Proxy authentication setup
+        if (this.proxy) {
+            try {
+                const proxyUrl = new URL(this.proxy);
+                if (proxyUrl.username && proxyUrl.password) {
+                    await page.authenticate({
+                        username: proxyUrl.username,
+                        password: proxyUrl.password,
+                    });
+                }
+            } catch (e) {
+                this.logger.warn(`Proxy auth setup failed (non-critical): ${e}`);
+            }
+        }
+
+        // 4. User Agent spoofing
+        const userAgent = new UserAgent({ deviceCategory: "desktop" });
+        await page.setUserAgent(userAgent.toString());
+
+        // 5. Viewport sizing
+        await page.setViewport({ width: 1280, height: 800 });
+
+        // 6. Window Title for User Identification
+        await page.evaluate((u) => {
+            const desiredTitle = `${u} - Instagram`;
+            const enforceTitle = () => {
+                if (document.title !== desiredTitle) {
+                    document.title = desiredTitle;
+                }
+            };
+            enforceTitle();
+            const observer = new MutationObserver(enforceTitle);
+            observer.observe(document.querySelector('title')!, { childList: true, subtree: true });
+            setInterval(enforceTitle, 1000);
+        }, this.username).catch(() => {});
+    }
+
+    private async ensureLoggedInState() {
+        if (!this.page) throw new Error("Page not initialized");
+
+        // --- POST-LAUNCH CAPTCHA CHECK ---
+        await this.handleRecaptcha();
+
+        if (await Instagram_cookiesExist() && !this.userDataDir) {
+            // If manual cookies and no strict profile isolation
+            await this.loginWithCookies();
+        } else if (this.userDataDir) {
+            // With persistent profile, cookies are auto-loaded. Just check login state.
+            // 3. Navigate to Instagram (Robust Retry)
+            try {
+                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+            } catch (navErr) {
+                this.logger.error(`Critical: Failed to navigate to Instagram after retries: ${navErr}`);
+                if (this.browser) await this.browser.close();
+                throw navErr;
+            }
+            await delay(2000); // Give it a moment to render
+            const currentUrl = this.page.url();
+            this.logger.info(`Current URL after navigation: ${currentUrl}`);
+
+            // Check if login fields are present
+            const isLoginFieldPresent = await this.page.$('input[name="username"]') !== null;
+
+            // Check for "Log In" button or link if inputs are missing (e.g. landing page)
+            const isLoginLinkPresent = await this.page.$('a[href*="/accounts/login"]') !== null;
+            const isLoginButtonPresent = await this.page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                return buttons.some(b => b.innerText?.toLowerCase().includes('log in') || b.innerText?.toLowerCase().includes('log on'));
+            });
+
+            // "Positive" check: Do we see the Feed or Nav?
+            const isNavPresent = await this.page.evaluate(() => {
+                const home = document.querySelector('svg[aria-label="Home"]');
+                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
+                const create = document.querySelector('svg[aria-label="New Post"]');
+                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
+                return !!(home || direct || create || activity);
+            });
+
+            this.logger.info(`Session Check: URL=${currentUrl}, Inputs=${isLoginFieldPresent}, Link=${isLoginLinkPresent}, Button=${isLoginButtonPresent}, Nav=${isNavPresent}`);
+
+            if (currentUrl.includes("/login/") || isLoginFieldPresent || isLoginLinkPresent || isLoginButtonPresent || !isNavPresent) {
+                this.logger.info("Session expired or new profile. Logging in with credentials...");
+                await this.loginWithCredentials();
+            } else {
+                this.logger.info("Restored session from profile (Login fields not found). Checking for interruptions...");
+
+                // Handle Cookie Wall / "Save Info" / "Notifications" even if we think we are logged in
+                try {
+                    await this.handleCookieConsent();
+                    await this.handleNotificationPopup();
+                } catch (e) { this.logger.warn(`Ignored error during popup check: ${e}`); }
+
+                try {
+                    this.logger.info("DEBUG: Checking Automated Behavior Warning...");
+                    await this.handleAutomatedBehaviorWarning();
+                    this.logger.info("DEBUG: Done Automated Behavior Warning.");
+                } catch (e) { this.logger.warn(`Ignored error during warning check: ${e}`); }
+
+                try {
+                    this.logger.info("DEBUG: Checking 'Not Now' button...");
+                    await Promise.race([
+                        (async () => {
+                            if (!this.page) return;
+                            const notNowButton = await this.page.evaluateHandle(() => {
+                                const buttons = Array.from(document.querySelectorAll('button'));
+                                return buttons.find(b => b.textContent === 'Not Now') || null;
+                            });
+                            const notNowButtonHandle = notNowButton.asElement();
+                            if (notNowButtonHandle) {
+                                this.logger.info("Found 'Not Now' button on restored session. Clicking...");
+                                await notNowButtonHandle.evaluate((b: any) => b.click());
+                                await delay(2000);
+                            }
+                        })(),
+                        new Promise(resolve => setTimeout(resolve, 3000))
+                    ]);
+                    this.logger.info("DEBUG: Done 'Not Now' button check.");
+                } catch (e) {
+                    this.logger.warn(`Ignored error during 'Not Now' check (possible frame detach): ${e}`);
+                }
+
+                try {
+                    this.logger.info("DEBUG: Taking debug screenshot...");
+                    await Promise.race([
+                        this.page.screenshot({ path: 'logs/debug_session_restored.png' }),
+                        new Promise(resolve => setTimeout(resolve, 5000))
+                    ]);
+                    this.logger.info("DEBUG: Done screenshot.");
+                } catch (e) {
+                    this.logger.warn("Screenshot failed (likely due to minimized window), skipping.");
+                }
+            }
+        } else {
+            await this.loginWithCredentials();
+        }
+    }
+
+    private async recreatePage() {
+        try {
+            if (this.page && !this.page.isClosed()) {
+                await this.page.close().catch(() => {});
+            }
+        } catch {}
+        this.page = null;
+
+        try {
+            if (!this.browser || !this.browser.isConnected()) {
+                this.logger.warn("Browser is disconnected or missing. Initializing new browser...");
+                await this.init();
+                return;
+            }
+            this.logger.info("Creating and configuring a new page...");
+            this.page = await this.browser.newPage();
+            await this.configurePage(this.page);
+            await this.ensureLoggedInState();
+        } catch (err: any) {
+            this.logger.error(`Error recreating page: ${err.message}. Performing full browser reset...`);
+            try {
+                if (this.browser) {
+                    await this.browser.close().catch(() => {});
+                }
+            } catch {}
+            this.browser = null;
+            this.page = null;
+            await this.init();
+        }
+    }
+
     private async ensurePageActive() {
         if (!this.browser) {
             await this.init();
             return;
         }
         if (!this.page || this.page.isClosed()) {
-            this.logger.info("Page is closed or missing. Creating a new page...");
-            this.page = await this.browser.newPage();
-            const userAgent = new UserAgent({ deviceCategory: "desktop" });
-            await this.page.setUserAgent(userAgent.toString());
-            await this.page.setViewport({ width: 1280, height: 800 });
-            this.page.setDefaultNavigationTimeout(60000);
+            this.logger.info("Page is closed or missing. Recreating page...");
+            await this.recreatePage();
             return;
         }
 
@@ -117,23 +296,26 @@ export class IgClient {
         try {
             await this.page.evaluate(() => 1);
         } catch (err: any) {
-            const isCrashedOrClosed = err.message?.includes('crashed') || err.message?.includes('closed') || this.page.isClosed();
+            const errText = err.message || '';
+            const isCriticalError = 
+                errText.includes('crashed') || 
+                errText.includes('closed') || 
+                errText.includes('detached') || 
+                this.page.isClosed();
             
-            if (isCrashedOrClosed) {
-                this.logger.warn(`Detected crashed or closed page: ${err.message}. Recreating page...`);
-                try {
-                    if (!this.page.isClosed()) {
-                        await this.page.close().catch(() => {});
-                    }
-                } catch {}
-                this.page = await this.browser.newPage();
-                const userAgent = new UserAgent({ deviceCategory: "desktop" });
-                await this.page.setUserAgent(userAgent.toString());
-                await this.page.setViewport({ width: 1280, height: 800 });
-                this.page.setDefaultNavigationTimeout(60000);
+            if (isCriticalError) {
+                this.logger.warn(`Detected crashed, closed, or detached page: ${errText}. Recreating page...`);
+                await this.recreatePage();
             } else {
-                this.logger.warn(`Page evaluate failed (likely transient navigation): ${err.message}. Waiting 2s for stabilization...`);
+                this.logger.warn(`Page evaluate failed (likely transient navigation): ${errText}. Waiting 2s for stabilization...`);
                 await delay(2000);
+                // Try evaluate again to verify stabilization
+                try {
+                    await this.page.evaluate(() => 1);
+                } catch (retryErr: any) {
+                    this.logger.warn(`Page evaluate failed again after stabilization wait: ${retryErr.message}. Recreating page...`);
+                    await this.recreatePage();
+                }
             }
         }
     }
@@ -345,148 +527,8 @@ export class IgClient {
 
         if (!this.browser || !this.page) throw new Error("Browser/Page failed to initialize after multiple attempts.");
 
-        if (this.proxy) {
-            try {
-                const proxyUrl = new URL(this.proxy);
-                if (proxyUrl.username && proxyUrl.password) {
-                    await this.page.authenticate({
-                        username: proxyUrl.username,
-                        password: proxyUrl.password,
-                    });
-                }
-            } catch (e) {
-                this.logger.warn(`Proxy auth setup failed (non-critical): ${e}`);
-            }
-        }
-
-        const userAgent = new UserAgent({ deviceCategory: "desktop" });
-        await this.page.setUserAgent(userAgent.toString());
-        await this.page.setViewport({ width, height });
-
-        // --- WINDOW TITLE FOR USER IDENTIFICATION ---
-        // --- WINDOW TITLE FOR USER IDENTIFICATION ---
-        // We use a persistent observer because Instagram (SPA) changes the title frequently.
-        await this.page.evaluate((u) => {
-            const desiredTitle = `${u} - Instagram`;
-            const enforceTitle = () => {
-                if (document.title !== desiredTitle) {
-                    document.title = desiredTitle;
-                }
-            };
-
-            // 1. Set immediately
-            enforceTitle();
-
-            // 2. Watch for changes
-            const observer = new MutationObserver(enforceTitle);
-            observer.observe(document.querySelector('title')!, { childList: true, subtree: true });
-
-            // 3. Interval backup (in case the mutation observer misses a full swap)
-            setInterval(enforceTitle, 1000);
-        }, this.username);
-
-        // --- POST-LAUNCH CAPTCHA CHECK ---
-        await this.handleRecaptcha();
-
-        if (await Instagram_cookiesExist() && !this.userDataDir) {
-            // If manual cookies and no strict profile isolation
-            await this.loginWithCookies();
-        } else if (this.userDataDir) {
-            // With persistent profile, cookies are auto-loaded. Just check login state.
-            // 3. Navigate to Instagram (Robust Retry)
-            try {
-                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
-            } catch (navErr) {
-                this.logger.error(`Critical: Failed to navigate to Instagram after retries: ${navErr}`);
-                if (this.browser) await this.browser.close();
-                throw navErr;
-            }
-            await delay(2000); // Give it a moment to render
-            const currentUrl = this.page.url();
-            this.logger.info(`Current URL after navigation: ${currentUrl}`);
-
-            // Check if login fields are present
-            const isLoginFieldPresent = await this.page.$('input[name="username"]') !== null;
-
-            // Check for "Log In" button or link if inputs are missing (e.g. landing page)
-            const isLoginLinkPresent = await this.page.$('a[href*="/accounts/login"]') !== null;
-            const isLoginButtonPresent = await this.page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.some(b => b.innerText?.toLowerCase().includes('log in') || b.innerText?.toLowerCase().includes('log on'));
-            });
-
-            // "Positive" check: Do we see the Feed or Nav?
-            // "Instagram" logo is present on public pages too, so we must rely on "Home", "Direct", "Messenger" etc.
-            const isNavPresent = await this.page.evaluate(() => {
-                const home = document.querySelector('svg[aria-label="Home"]');
-                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
-                const create = document.querySelector('svg[aria-label="New Post"]');
-                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
-                const profile = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]'); // unreliable if _sharedData missing
-                return !!(home || direct || create || activity);
-            });
-
-            this.logger.info(`Session Check: URL=${currentUrl}, Inputs=${isLoginFieldPresent}, Link=${isLoginLinkPresent}, Button=${isLoginButtonPresent}, Nav=${isNavPresent}`);
-
-            if (currentUrl.includes("/login/") || isLoginFieldPresent || isLoginLinkPresent || isLoginButtonPresent || !isNavPresent) {
-                this.logger.info("Session expired or new profile. Logging in with credentials...");
-                await this.loginWithCredentials();
-            } else {
-                this.logger.info("Restored session from profile (Login fields not found). Checking for interruptions...");
-
-                // Handle Cookie Wall / "Save Info" / "Notifications" even if we think we are logged in
-                // Wrap in try-catch to avoid "Execution context destroyed" if page reloads
-                try {
-                    await this.handleCookieConsent();
-                    await this.handleNotificationPopup();
-                } catch (e) { this.logger.warn(`Ignored error during popup check: ${e}`); }
-
-                try {
-                    this.logger.info("DEBUG: Checking Automated Behavior Warning...");
-                    await this.handleAutomatedBehaviorWarning();
-                    this.logger.info("DEBUG: Done Automated Behavior Warning.");
-                } catch (e) { this.logger.warn(`Ignored error during warning check: ${e}`); }
-
-                // Check for "Not Now" button (e.g. Save Info, Try New Look, etc.)
-                try {
-                    this.logger.info("DEBUG: Checking 'Not Now' button...");
-                    // Wrap in timeout to prevent hang
-                    await Promise.race([
-                        (async () => {
-                            if (!this.page) return;
-                            const notNowButton = await this.page.evaluateHandle(() => {
-                                const buttons = Array.from(document.querySelectorAll('button'));
-                                return buttons.find(b => b.textContent === 'Not Now') || null;
-                            });
-                            const notNowButtonHandle = notNowButton.asElement();
-                            if (notNowButtonHandle) {
-                                this.logger.info("Found 'Not Now' button on restored session. Clicking...");
-                                await notNowButtonHandle.evaluate((b: any) => b.click());
-                                await delay(2000);
-                            }
-                        })(),
-                        new Promise(resolve => setTimeout(resolve, 3000))
-                    ]);
-                    this.logger.info("DEBUG: Done 'Not Now' button check.");
-                } catch (e) {
-                    this.logger.warn(`Ignored error during 'Not Now' check (possible frame detach): ${e}`);
-                }
-
-                try {
-                    this.logger.info("DEBUG: Taking debug screenshot...");
-                    // Screenshot can hang on minimized windows
-                    await Promise.race([
-                        this.page.screenshot({ path: 'logs/debug_session_restored.png' }),
-                        new Promise(resolve => setTimeout(resolve, 5000))
-                    ]);
-                    this.logger.info("DEBUG: Done screenshot.");
-                } catch (e) {
-                    this.logger.warn("Screenshot failed (likely due to minimized window), skipping.");
-                }
-            }
-        } else {
-            await this.loginWithCredentials();
-        }
+        await this.configurePage(this.page);
+        await this.ensureLoggedInState();
     }
 
     private async loginWithCookies() {
@@ -2007,7 +2049,7 @@ export class IgClient {
                         continue;
                     }
 
-                    await postElement.click();
+                    await this.humanLikeClick(postElement);
                     await delay(getHumanLikeDelay(3000, 1500)); // Wait for modal to open
 
                     // Connectivity check for modal
@@ -2063,7 +2105,7 @@ export class IgClient {
                                     const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
                                     if (isConnected) {
                                         this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
-                                        await likeButton.click();
+                                        await this.humanLikeClick(likeButton);
                                         await delay(getHumanLikeDelay(1500, 800));
 
                                         await this.checkActionBlock("Hashtag Like Action");
@@ -2098,7 +2140,7 @@ export class IgClient {
                                     const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
                                     if (isConnected) {
                                         this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
-                                        await btn.click();
+                                        await this.humanLikeClick(btn);
                                         await delay(getHumanLikeDelay(1500, 800));
                                         likedCount++;
                                     }
@@ -2154,7 +2196,7 @@ export class IgClient {
                         const closeBtnHandle = closeButton.asElement();
                         if (closeBtnHandle) {
                             this.logger.info("Closing modal via button click...");
-                            await (closeBtnHandle as any).click().catch(() => {});
+                            await this.humanLikeClick(closeBtnHandle as any).catch(() => {});
                             await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
                             await delay(1000);
                         } else {
@@ -2460,7 +2502,7 @@ export class IgClient {
                             if (postButtonElement) {
                                 console.log(`Posting comment on post ${postIndex}...`);
                                 // Click logic...
-                                await (postButtonElement as puppeteer.ElementHandle<Element>).click();
+                                await this.humanLikeClick(postButtonElement as puppeteer.ElementHandle<Element>);
                                 console.log(`Comment posted on post ${postIndex}.`);
 
                                 // CHECK FOR ACTION BLOCK (Soft Block)
