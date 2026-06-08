@@ -2271,7 +2271,21 @@ this.logger.info("Waiting for page hydration...");
         // 4. Perform the click using JS Evaluate
         // We use evaluate() instead of element.click() because the latter often causes
         // "ProtocolError: Runtime.callFunctionOn timed out" on heavy pages or with stealth plugins.
-        await element.evaluate((el: Element) => (el as HTMLElement).click());
+        // We handle SVG and other elements that don't implement direct .click() by searching for
+        // the closest clickable parent or dispatching a custom click event.
+        await element.evaluate((el: Element) => {
+            const clickable = el.closest('button, [role="button"], a');
+            if (clickable && typeof (clickable as any).click === 'function') {
+                (clickable as any).click();
+            } else if (typeof (el as any).click === 'function') {
+                (el as any).click();
+            } else if (el.parentElement && typeof (el.parentElement as any).click === 'function') {
+                (el.parentElement as any).click();
+            } else {
+                const ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                el.dispatchEvent(ev);
+            }
+        });
     }
 
     async interactWithPosts(options: {
