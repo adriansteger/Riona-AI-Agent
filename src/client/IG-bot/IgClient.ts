@@ -1942,14 +1942,13 @@ export class IgClient {
                 await this.gotoWithRetry(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
 
                 // Allow hydration time (essential for React)
-                this.logger.info("Waiting for page hydration...");
+this.logger.info("Waiting for page hydration...");
                 await delay(5000);
 
                 // Scroll down to trigger lazy-loaded grid
                 await this.page.evaluate(() => window.scrollBy(0, 300));
-                await delay(2000);
-
                 this.logger.info(`Starting Hashtag Grid iteration for #${tag}...`);
+                let consecutiveEmptyScrolls = 0;
 
                 while (actionsDone < targetActions && postsChecked < maxPostsToInspect) {
                     let interactionPerformed = false;
@@ -1998,6 +1997,11 @@ export class IgClient {
                     // Success - reset retries
                     stabilizationRetries = 0;
 
+                    // Reset consecutive scrolls if we have unchecked links in the current fetched list
+                    if (postLinks.length > 0 && postsChecked < postLinks.length) {
+                        consecutiveEmptyScrolls = 0;
+                    }
+
                     // --- URL VALIDITY CHECK ---
                     // Ensure we are still on the hashtag page and haven't been redirected (e.g. to login)
                     const currentUrl = this.page.url();
@@ -2008,6 +2012,11 @@ export class IgClient {
                     }
 
                     if (postLinks.length === 0) {
+                        consecutiveEmptyScrolls++;
+                        if (consecutiveEmptyScrolls >= 4) {
+                            this.logger.warn("Scroll limit reached with 0 post links. Breaking current hashtag loop.");
+                            break;
+                        }
                         this.logger.warn("No post links found in grid. Scrolling...");
                         await this.page.evaluate(() => window.scrollBy(0, 500));
                         await delay(2000);
@@ -2018,6 +2027,11 @@ export class IgClient {
                     // Pick the post at current index (postsChecked)
                     // If we ran out of links in the current view, scroll down
                     if (postsChecked >= postLinks.length) {
+                        consecutiveEmptyScrolls++;
+                        if (consecutiveEmptyScrolls >= 4) {
+                            this.logger.warn("Scroll limit reached without finding new posts. Breaking current hashtag loop.");
+                            break;
+                        }
                         this.logger.info("Reached end of visible links. Scrolling for more...");
                         await this.page.evaluate(() => window.scrollBy(0, 800));
                         await delay(3000);
