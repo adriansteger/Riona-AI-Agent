@@ -89,7 +89,9 @@ const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
 const sessionLimit = pLimit(maxConcurrent);
 
 // Concurrency limiter for heavy interaction tasks (likes, comments, etc.) to prevent blocking DM checks
-const maxConcurrentInteractions = parseInt(process.env.MAX_CONCURRENT_INTERACTIONS || '1', 10);
+const maxConcurrentInteractions = process.env.MAX_CONCURRENT_INTERACTIONS 
+  ? parseInt(process.env.MAX_CONCURRENT_INTERACTIONS, 10) 
+  : Math.min(maxConcurrent, 5);
 const interactionLimit = pLimit(maxConcurrentInteractions);
 
 
