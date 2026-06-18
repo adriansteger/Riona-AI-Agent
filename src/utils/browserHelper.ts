@@ -33,7 +33,14 @@ export const killChromeProcessByProfile = async (userDataDir: string): Promise<v
             return resolve();
         }
 
+        // Set a 15-second safety timeout to prevent child_process.exec from hanging indefinitely
+        const timer = setTimeout(() => {
+            logger.warn(`killChromeProcessByProfile command timed out for profile ${profileFolder}. Resolving to prevent hanging loop.`);
+            resolve();
+        }, 15000);
+
         exec(command, (error, stdout, stderr) => {
+            clearTimeout(timer);
             if (error) {
                 // Ignore "process not found" errors
                 // Windows: 2147749891 or "No Instance(s) Available"

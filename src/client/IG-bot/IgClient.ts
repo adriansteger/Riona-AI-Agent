@@ -423,7 +423,11 @@ export class IgClient {
         const maxAttempts = 3; // Reduced to 3 to avoid long loops in case of critical failure
         while (attempt < maxAttempts) {
             try {
-                this.browser = await puppeteerExtra.launch(launchOptions);
+                // Wrap browser launch in a 90-second timeout to prevent infinite hangs
+                this.browser = await Promise.race([
+                    puppeteerExtra.launch(launchOptions),
+                    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Browser launch timeout")), 90000))
+                ]);
                 
                 // CRITICAL: Give the browser and stealth plugin a moment to stabilize
                 await delay(2000);
@@ -2663,16 +2667,23 @@ this.logger.info("Waiting for page hydration...");
             try {
                 // Get process ID before closing
                 const proc = this.browser.process();
-                await this.browser.close();
-
-                // Ensure double-tap kill if process still exists (optional/aggressive)
-                if (proc) {
-                    try {
-                        proc.kill('SIGKILL');
-                    } catch (e) { }
-                }
+                
+                // Wrap graceful browser close in a 15-second timeout to prevent hanging the process
+                await Promise.race([
+                    this.browser.close(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Browser close timeout")), 15000))
+                ]).catch(async (closeErr) => {
+                    this.logger.warn(`Browser close timed out or failed: ${closeErr.message || closeErr}. Force killing process...`);
+                    if (proc) {
+                        try {
+                            proc.kill('SIGKILL');
+                        } catch (killErr) {
+                            this.logger.error(`Failed to force kill process: ${killErr}`);
+                        }
+                    }
+                });
             } catch (e) {
-                this.logger.warn(`Error closing browser gracefully: ${e}`);
+                this.logger.warn(`Error closing browser: ${e}`);
             }
             this.browser = null;
             this.page = null;
