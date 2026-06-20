@@ -268,6 +268,12 @@ const processAccount = async (account: any, emailService?: EmailService) => {
         }
 
         if (!igClient) {
+          const headlessMode = account.settings?.headless !== undefined
+            ? !!account.settings.headless
+            : (process.env.HEADLESS !== undefined
+                ? process.env.HEADLESS === 'true'
+                : isDMOnlyRun);
+
           // Initialize New Client
           igClient = new IgClient({
             username: account.username,
@@ -276,7 +282,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
             proxy: account.proxy,
             languages: account.settings?.languages,
             defaultLanguage: account.settings?.defaultLanguage,
-            headless: isDMOnlyRun ? (account.settings?.headless !== false) : (process.env.HEADLESS === 'true' || account.settings?.headless)
+            headless: headlessMode
           }, accountLogger, character, emailService);
 
           activeSessions.set(account.id, igClient);

@@ -321,12 +321,7 @@ export class IgClient {
     }
 
 
-    async init() {
-        if (this.isConnected()) {
-            this.logger.info("Browser already active and connected. Skipping launch.");
-            return;
-        }
-
+    async launchBrowserInstance() {
         // Center the window on a 1920x1080 screen
         const width = 1280;
         const height = 800;
@@ -394,7 +389,6 @@ export class IgClient {
             const absoluteUserDataDir = path.resolve(process.cwd(), this.userDataDir);
             launchOptions.userDataDir = absoluteUserDataDir;
             // Ensure directory exists
-            // Ensure directory exists
             await fs.mkdir(absoluteUserDataDir, { recursive: true }).catch(() => { });
 
             // PROACTIVE CLEANUP: Kill processes and clear stale locks BEFORE first launch attempt
@@ -432,10 +426,16 @@ export class IgClient {
                 // CRITICAL: Give the browser and stealth plugin a moment to stabilize
                 await delay(2000);
 
-                // REUSE INITIAL PAGE: HEADLESS=FALSE often opens a default blank tab. 
-                // Using newPage() creates a SECOND tab, which can overload the frame manager during startup.
                 const pages = await this.browser.pages();
                 this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
+
+                // Close any extra pages/tabs (e.g. restored from previous crashed session)
+                if (pages.length > 1) {
+                    this.logger.info(`Closing ${pages.length - 1} restored/extra tabs...`);
+                    for (let i = 1; i < pages.length; i++) {
+                        await pages[i].close().catch(() => {});
+                    }
+                }
 
                 // Small delay to ensure the page object is fully hydrated
                 await delay(500);
@@ -532,6 +532,15 @@ export class IgClient {
         if (!this.browser || !this.page) throw new Error("Browser/Page failed to initialize after multiple attempts.");
 
         await this.configurePage(this.page);
+    }
+
+    async init() {
+        if (this.isConnected()) {
+            this.logger.info("Browser already active and connected. Skipping launch.");
+            return;
+        }
+
+        await this.launchBrowserInstance();
         await this.ensureLoggedInState();
     }
 
@@ -931,6 +940,7 @@ export class IgClient {
         try {
             const currentUrl = this.page.url();
             const isChallengeUrl = currentUrl.includes('/challenge/');
+            const isRecaptchaUrl = currentUrl.includes('/recaptcha/') || currentUrl.includes('/auth_platform/recaptcha/');
 
             // Check for reCAPTCHA iframes or classic captcha elements
             const hasCaptcha = await this.page.evaluate(() => {
@@ -940,7 +950,30 @@ export class IgClient {
                 return !!recaptchaIframe || !!captchaBox;
             });
 
-            if (isChallengeUrl || hasCaptcha) {
+            if (isChallengeUrl || hasCaptcha || isRecaptchaUrl) {
+                if (this.headless) {
+                    this.logger.warn("⚠️ reCAPTCHA detected in HEADLESS mode. Re-launching headfully to allow manual intervention...");
+                    this.headless = false;
+
+                    const targetUrl = this.page.url();
+
+                    if (this.browser) {
+                        await this.browser.close().catch(() => {});
+                        this.browser = null;
+                        this.page = null;
+                    }
+
+                    await this.launchBrowserInstance();
+
+                    if (this.page) {
+                        this.logger.info(`Navigating headful browser to target URL: ${targetUrl}`);
+                        await this.page.goto(targetUrl, { waitUntil: 'networkidle2' }).catch(() => {});
+                        // Run recaptcha check again (which will hit the wait loop and pause)
+                        await this.handleRecaptcha();
+                    }
+                    return;
+                }
+
                 this.logger.error(`🚨 CRITICAL: reCAPTCHA DETECTED for user ${this.username} 🚨`);
                 this.logger.error(`URL: ${currentUrl}`);
 
@@ -966,7 +999,8 @@ export class IgClient {
                         const iframes = Array.from(document.querySelectorAll('iframe'));
                         const recaptchaIframe = iframes.find(f => f.src.includes('recaptcha') || f.src.includes('google.com/recaptcha'));
                         const challengeUrl = window.location.href.includes('/challenge/');
-                        return !!recaptchaIframe || challengeUrl;
+                        const recaptchaUrl = window.location.href.includes('/recaptcha/') || window.location.href.includes('/auth_platform/recaptcha/');
+                        return !!recaptchaIframe || challengeUrl || recaptchaUrl;
                     });
 
                     if (!stillHasCaptcha) {
