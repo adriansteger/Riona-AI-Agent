@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { getBrowserExecutablePath } from '../../utils';
 
 dotenv.config();
 
@@ -66,35 +67,21 @@ export class JobClient {
     async init() {
         if (this.browser && this.browser.isConnected()) return;
 
-        // Detect Linux/Raspberry Pi System Browser (Fix for ELF errors/ARM mismatch)
-        let executablePath: string | undefined;
+        // Detect system Chrome/Edge/Chromium executable across Windows, Linux, and macOS
+        const executablePath = await getBrowserExecutablePath();
+
         if (process.platform === 'linux') {
             try {
-                const fs = require('fs');
-                const commonPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome-stable'];
-                for (const p of commonPaths) {
-                    if (fs.existsSync(p)) {
-                        logger.info(`Found system browser at ${p}. Using it instead of bundled Chrome.`);
-                        executablePath = p;
-                        break;
-                    }
-                }
-
                 // Proactive Cleanup: Kill orphan Chromium processes to prevent "Too many windows"
                 // on execution start, especially if previous run crashed.
-                try {
-                    logger.info("Performing proactive process cleanup...");
-                    const { execSync } = require('child_process');
-                    // Kill chromium processes owned by this user
-                    execSync('pkill -u $(whoami) -f chromium', { stdio: 'ignore' });
-                    // Also kill chrome
-                    execSync('pkill -u $(whoami) -f chrome', { stdio: 'ignore' });
-                    logger.info("Cleanup complete.");
-                    // eslint-disable-next-line no-empty
-                } catch (e) { }
-            } catch (e) {
-                logger.warn(`Failed to detect system browser: ${e}`);
-            }
+                logger.info("Performing proactive process cleanup...");
+                const { execSync } = require('child_process');
+                // Kill chromium processes owned by this user
+                execSync('pkill -u $(whoami) -f chromium', { stdio: 'ignore' });
+                // Also kill chrome
+                execSync('pkill -u $(whoami) -f chrome', { stdio: 'ignore' });
+                logger.info("Cleanup complete.");
+            } catch (e) { }
         }
 
         logger.info("Initializing Browser for Job Search...");

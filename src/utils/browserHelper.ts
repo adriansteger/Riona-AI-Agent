@@ -90,3 +90,66 @@ export const getHumanLikeDelay = (baseMs: number, varianceMs: number): number =>
     delay = Math.max(baseMs - varianceMs, Math.min(baseMs + varianceMs, delay));
     return Math.floor(delay);
 };
+
+/**
+ * Detects the Chrome/Chromium executable path across platforms (Windows, Linux, macOS).
+ * Returns the path to the executable if found, or undefined to let Puppeteer use its default downloaded Chrome.
+ */
+export const getBrowserExecutablePath = async (): Promise<string | undefined> => {
+    const platform = process.platform;
+
+    if (platform === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || 'C:\\Users\\asco5', 'AppData', 'Local');
+        const programFiles = process.env.PROGRAMFILES || 'C:\\Program Files';
+        const programFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+
+        const winPaths = [
+            path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            // Fallback to Edge if Chrome is not found
+            path.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+            path.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        ];
+
+        for (const p of winPaths) {
+            try {
+                const fsPromises = require('fs').promises;
+                await fsPromises.access(p);
+                logger.info(`Detected Windows system browser, using: ${p}`);
+                return p;
+            } catch (e) { /* ignore */ }
+        }
+    } else if (platform === 'linux') {
+        const linuxPaths = [
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome'
+        ];
+        for (const p of linuxPaths) {
+            try {
+                const fsPromises = require('fs').promises;
+                await fsPromises.access(p);
+                logger.info(`Detected Linux system browser, using: ${p}`);
+                return p;
+            } catch (e) { /* ignore */ }
+        }
+    } else if (platform === 'darwin') {
+        const macPaths = [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium'
+        ];
+        for (const p of macPaths) {
+            try {
+                const fsPromises = require('fs').promises;
+                await fsPromises.access(p);
+                logger.info(`Detected macOS system browser, using: ${p}`);
+                return p;
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    return undefined;
+};
+

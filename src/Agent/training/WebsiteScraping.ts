@@ -1,7 +1,7 @@
 import puppeteer from "puppeteer";
 import DOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
-import { saveScrapedData } from "../../utils";
+import { saveScrapedData, getBrowserExecutablePath } from "../../utils";
 
 // Function to clean the HTML content
 function cleanHTML(inputHtml: string): string {
@@ -23,7 +23,9 @@ async function scrapeAndCleanContent(url: string): Promise<string | null> {
       args.push(`--proxy-server=${process.env.HTTP_PROXY}`);
     }
 
+    const executablePath = await getBrowserExecutablePath();
     const browser = await puppeteer.launch({
+      executablePath,
       headless: true,
       args: args,
     });
@@ -61,7 +63,9 @@ async function getAllLinks(url: string): Promise<string[]> {
       args.push(`--proxy-server=${process.env.HTTP_PROXY}`);
     }
 
+    const executablePath = await getBrowserExecutablePath();
     const browser = await puppeteer.launch({
+      executablePath,
       headless: true,
       args: args,
     });

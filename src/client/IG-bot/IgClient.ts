@@ -7,7 +7,7 @@ import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
 import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
-import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile, getHumanLikeDelay } from "../../utils";
+import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile, getHumanLikeDelay, getBrowserExecutablePath } from "../../utils";
 import { runAgent } from "../../Agent";
 import path from "path";
 import { getInstagramCommentSchema, getInstagramDMResponseSchema } from "../../Agent/schema";
@@ -355,25 +355,8 @@ export class IgClient {
             launchArgs.push(`--proxy-server=${this.proxy}`);
         }
 
-        // Check for Linux/ARM (Raspberry Pi) compatibility to avoid "ELF not found" (Architecture Mismatch)
-        let executablePath: string | undefined;
-        if (process.platform === 'linux') {
-            try {
-                // Common paths for Chromium on Raspberry Pi / Linux
-                const commonPaths = ['/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome-stable'];
-                for (const p of commonPaths) {
-                    try {
-                        // We use fs.stat (async) to check existence to avoid blocking or sync import issues
-                        await fs.access(p); // properties of fs depends on import
-                        executablePath = p;
-                        this.logger.info(`Detected Linux system browser, using: ${p}`);
-                        break;
-                    } catch (e) { /* ignore */ }
-                }
-            } catch (e) {
-                // Fallback to default
-            }
-        }
+        // Detect system Chrome/Edge/Chromium executable across Windows, Linux, and macOS
+        const executablePath = await getBrowserExecutablePath();
 
         const launchOptions: any = {
             headless: this.headless,
