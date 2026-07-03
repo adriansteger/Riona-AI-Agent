@@ -206,13 +206,10 @@ export class IgClient {
                 } catch (e) { this.logger.warn(`Ignored error during popup check: ${e}`); }
 
                 try {
-                    this.logger.info("DEBUG: Checking Automated Behavior Warning...");
                     await this.handleAutomatedBehaviorWarning();
-                    this.logger.info("DEBUG: Done Automated Behavior Warning.");
                 } catch (e) { this.logger.warn(`Ignored error during warning check: ${e}`); }
 
                 try {
-                    this.logger.info("DEBUG: Checking 'Not Now' button...");
                     await Promise.race([
                         (async () => {
                             if (!this.page) return;
@@ -229,20 +226,8 @@ export class IgClient {
                         })(),
                         new Promise(resolve => setTimeout(resolve, 3000))
                     ]);
-                    this.logger.info("DEBUG: Done 'Not Now' button check.");
                 } catch (e) {
                     this.logger.warn(`Ignored error during 'Not Now' check (possible frame detach): ${e}`);
-                }
-
-                try {
-                    this.logger.info("DEBUG: Taking debug screenshot...");
-                    await Promise.race([
-                        this.page.screenshot({ path: 'logs/debug_session_restored.png' }),
-                        new Promise(resolve => setTimeout(resolve, 5000))
-                    ]);
-                    this.logger.info("DEBUG: Done screenshot.");
-                } catch (e) {
-                    this.logger.warn("Screenshot failed (likely due to minimized window), skipping.");
                 }
             }
         } else {
@@ -1333,79 +1318,28 @@ export class IgClient {
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
 
-        // Listener handler
-        const consoleHandler = (msg: any) => {
-            if (msg.text().includes('[REQ DEBUG]')) console.log(`BROWSER REQ: ${msg.text()}`);
-        };
-
         try {
-            // Enable Console Logging for this method
-            page.on('console', consoleHandler);
-
             this.logger.info("Checking for DM Requests...");
             await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" }, 3, page);
             await delay(3000);
 
-            // DEBUG: Dump Page Structure to identify selectors
             if (page.isClosed()) {
                 this.logger.warn("Page is closed. Aborting requests loop.");
                 return;
             }
-            await page.evaluate(() => {
-                console.log("[REQ DEBUG] Analysis Started.");
-                const allDivs = Array.from(document.querySelectorAll('div, a, button'));
-                let candidates = 0;
-                allDivs.forEach((el, index) => {
-                    const r = el.getBoundingClientRect();
-                    // Basic visibility check
-                    if (r.width < 10 || r.height < 10) return;
 
-                    const role = el.getAttribute('role');
-                    const label = el.getAttribute('aria-label');
-                    const txt = (el as HTMLElement).innerText?.substring(0, 20).replace(/\n/g, "|") || "";
-
-                    // Filter for interesting elements
-                    if (role === 'button' || role === 'link' || role === 'listitem' || (txt.length > 3 && r.width > 200)) {
-                        if (candidates < 20) {
-                            console.log(`[REQ DEBUG] El #${index}: <${el.tagName.toLowerCase()}> Role=${role} Class="${el.className}" Size=${Math.round(r.width)}x${Math.round(r.height)} Text="${txt}"`);
-                            candidates++;
-                        }
-                    }
-                });
-                console.log(`[REQ DEBUG] Analysis Complete. Found ${candidates} visible candidates.`);
-            });
-
-            // Strategy 1: Specific Listbox Buttons
-            let requests: ElementHandle<Element>[] = await page.$$('div[role="listbox"] div[role="button"]');
-
-            // Strategy 2: Broad "listitem" or "row"
-            if (requests.length === 0 && !page.isClosed()) {
-                this.logger.info("Strategy 1 (Listbox) failed. Trying Strategy 2 (Broad Rows)...");
-                requests = await page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
-            }
-
-            // Save debug screenshot ONLY if element detection failed
-            if (requests.length === 0 && !page.isClosed()) {
-                this.logger.warn("Failed to detect any DM requests. Saving debug screenshot...");
-                try {
-                    const screenshotPath = path.resolve('screenshots', `requests_failed_${Date.now()}.png`);
-                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true }).catch(() => { });
-                    await page.screenshot({ path: screenshotPath });
-                    this.logger.info(`Saved requests debug screenshot: ${screenshotPath}`);
-                } catch (e) { /* ignore */ }
-            }
-
-
-            // Strategy 3: Text Search for "Request" context (Blind Attempt)
-            if (requests.length === 0 && !page.isClosed()) {
-                this.logger.info("Strategy 2 failed. Trying Strategy 3 (Any wide button)...");
-                // Filter for elements that look like user rows
+            // Strategy 1: Shape-Based Row Detection (Most reliable)
+            let requests: ElementHandle<Element>[] = [];
+            if (!page.isClosed()) {
                 requests = await page.evaluateHandle(() => {
                     const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
                     return candidates.filter(c => {
                         const r = c.getBoundingClientRect();
-                        // Wide and short? (Row shape)
-                        return r.width > 200 && r.height > 40 && r.height < 150;
+                        const txt = (c as HTMLElement).innerText || "";
+                        const isHiddenReq = txt.includes("Hidden Requests");
+                        const isHeader = txt.includes("Message requests") || txt.includes("Decide who can");
+                        const isPrimary = r.width > 200 && r.height > 40 && r.height < 150;
+                        return isPrimary && !isHiddenReq && !isHeader;
                     });
                 }).then(async h => {
                     const props = await h.getProperties();
@@ -1418,8 +1352,20 @@ export class IgClient {
                 });
             }
 
+            // Strategy 2: Specific Listbox Buttons (Fallback)
+            if (requests.length === 0 && !page.isClosed()) {
+                this.logger.info("Strategy 1 (Shape-Based) failed. Trying Strategy 2 (Listbox)...");
+                requests = await page.$$('div[role="listbox"] div[role="button"]');
+            }
+
+            // Strategy 3: Broad "listitem" or "row" (Fallback)
+            if (requests.length === 0 && !page.isClosed()) {
+                this.logger.info("Strategy 2 (Listbox) failed. Trying Strategy 3 (Broad Rows)...");
+                requests = await page.$$('div[role="listitem"], div[role="row"], a[href^="/direct/t/"]');
+            }
+
             if (requests.length === 0) {
-                this.logger.info("No DM requests found (checked multiple strategies).");
+                this.logger.info("No DM requests found.");
                 return;
             }
 
@@ -1521,10 +1467,6 @@ export class IgClient {
             }
         } catch (e) {
             this.logger.error(`Error accepting DM requests: ${e}`);
-        } finally {
-            if (!page.isClosed()) {
-                page.off('console', consoleHandler);
-            }
         }
     }
 
@@ -1538,6 +1480,13 @@ export class IgClient {
         }
 
         try {
+            // Wait for chat input textbox or messages to load so we don't scrape a transitioning/blank page
+            await Promise.race([
+                page.waitForSelector('div[role="textbox"]', { timeout: 8000 }),
+                page.waitForSelector('div[dir="auto"]', { timeout: 8000 })
+            ]).catch(() => {});
+            await delay(2000); // Small buffer to ensure messages render completely
+
             // 1. Detect conversation partner username from Header
             const partnerUsername = await page.evaluate(() => {
                 const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
@@ -1796,7 +1745,13 @@ export class IgClient {
                     unreadThread = await this.page.evaluateHandle((myUser) => {
                         let threads = Array.from(document.querySelectorAll('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
                         if (threads.length === 0) {
-                            threads = Array.from(document.querySelectorAll('div[role="button"], a[href^="/direct/t/"]'));
+                            const candidates = Array.from(document.querySelectorAll('div[role="button"], a'));
+                            threads = candidates.filter(c => {
+                                const r = c.getBoundingClientRect();
+                                const isRow = r.width > 200 && r.height > 40 && r.height < 150;
+                                const isHref = c.tagName === 'A' && c.getAttribute('href')?.startsWith('/direct/t/');
+                                return isRow || isHref;
+                            });
                         }
                         return threads.find((t, index) => {
                             const textContent = (t as HTMLElement).innerText || '';
