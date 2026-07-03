@@ -165,7 +165,7 @@ export class IgClient {
                 await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
             } catch (navErr) {
                 this.logger.error(`Critical: Failed to navigate to Instagram after retries: ${navErr}`);
-                if (this.browser) await this.browser.close();
+                await this.close();
                 throw navErr;
             }
             await delay(2000); // Give it a moment to render
@@ -270,13 +270,7 @@ export class IgClient {
             await this.ensureLoggedInState();
         } catch (err: any) {
             this.logger.error(`Error recreating page: ${err.message}. Performing full browser reset...`);
-            try {
-                if (this.browser) {
-                    await this.browser.close().catch(() => {});
-                }
-            } catch {}
-            this.browser = null;
-            this.page = null;
+            await this.close();
             await this.init();
         }
     }
@@ -462,10 +456,7 @@ export class IgClient {
                 this.logger.error(`Failed to launch browser or open page (attempt ${attempt}/${maxAttempts}): ${err}`);
 
                 // Ensure browser is closed if it opened but page failed
-                if (this.browser) {
-                    await this.browser.close().catch(() => { });
-                    this.browser = null;
-                }
+                await this.close();
 
                 if (attempt >= maxAttempts) throw err;
 
@@ -940,11 +931,7 @@ export class IgClient {
 
                     const targetUrl = this.page.url();
 
-                    if (this.browser) {
-                        await this.browser.close().catch(() => {});
-                        this.browser = null;
-                        this.page = null;
-                    }
+                    await this.close();
 
                     await this.launchBrowserInstance();
 
@@ -2696,6 +2683,13 @@ this.logger.info("Waiting for page hydration...");
                             proc.kill('SIGKILL');
                         } catch (killErr) {
                             this.logger.error(`Failed to force kill process: ${killErr}`);
+                        }
+                    }
+                    if (this.userDataDir) {
+                        try {
+                            await killChromeProcessByProfile(this.userDataDir);
+                        } catch (e: any) {
+                            this.logger.error(`Failed to run profile process cleanup: ${e.message}`);
                         }
                     }
                 });
