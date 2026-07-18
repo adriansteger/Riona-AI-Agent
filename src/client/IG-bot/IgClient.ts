@@ -173,7 +173,7 @@ export class IgClient {
             this.logger.info(`Current URL after navigation: ${currentUrl}`);
 
             // Check if login fields are present
-            const isLoginFieldPresent = await this.page.$('input[name="username"]') !== null;
+            const isLoginFieldPresent = await this.page.$('input[name="username"], input[name="_username"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="benutzername" i]') !== null;
 
             // Check for "Log In" button or link if inputs are missing (e.g. landing page)
             const isLoginLinkPresent = await this.page.$('a[href*="/accounts/login"]') !== null;
@@ -573,7 +573,7 @@ export class IgClient {
                 };
 
                 const passwordInput = document.querySelector('input[name="password"], input[type="password"]');
-                const usernameInput = document.querySelector('input[name="username"]');
+                const usernameInput = document.querySelector('input[name="username"], input[name="_username"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="benutzername" i]');
 
                 // Check visibility to avoid hidden inputs triggering false negatives
                 // We also check case-insensitively for the username on the page
@@ -639,7 +639,7 @@ export class IgClient {
                 // Relaxed condition: If body clearly mentions our username, we prioritize password entry even if a username field is technically visible (e.g. in background).
                 const { hasVisiblePassword, hasVisibleUsername, bodyHasUsername } = await this.page!.evaluate((targetUsername) => {
                     const passEl = document.querySelector('input[name="password"], input[type="password"]');
-                    const userEl = document.querySelector('input[name="username"]');
+                    const userEl = document.querySelector('input[name="username"], input[name="_username"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="benutzername" i]');
                     const bodyText = document.body.innerText || document.body.textContent || "";
 
                     const isVisible = (el: Element | null) => {
@@ -687,45 +687,71 @@ export class IgClient {
         }
 
 
-        try {
-            // Strategy 1: Standard Name
-            // Ensure we wait for a VISIBLE input, so we don't get stuck on hidden ones.
-            await this.page.waitForSelector('input[name="username"]', { visible: true, timeout: 10000 });
-        } catch (e) {
-            logger.warn("Standard input[name='username'] not found. Trying alternatives...");
+        const compoundUsernameSelector = 'input[name="username"], input[name="_username"], input[name="email"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="phone" i], input[aria-label*="benutzername" i], input[placeholder*="username" i], input[placeholder*="benutzername" i]';
 
-            // Strategy 2: Focus Search
+        try {
+            // Strategy 1: Standard & Extended Compound Selectors
+            // Ensure we wait for a VISIBLE input, so we don't get stuck on hidden ones.
+            await this.page.waitForSelector(compoundUsernameSelector, { visible: true, timeout: 10000 });
+        } catch (e) {
+            logger.warn("Standard login input selector not found. Retrying Cookie Consent check and alternative strategies...");
+
+            // Re-attempt cookie consent dismissal in case it rendered after navigation
+            await this.handleCookieConsent();
+            await delay(1000);
+
+            // Strategy 2: Focus Search across non-password inputs
             const inputFound = await this.page.evaluate(() => {
                 const inputs = Array.from(document.querySelectorAll('input'));
-                const textLikeInputs = inputs.filter(i => i.type === 'text' || i.type === 'email' || i.type === 'tel');
+                const nonSecretInputs = inputs.filter(i => {
+                    const t = (i.type || 'text').toLowerCase();
+                    return !['password', 'hidden', 'submit', 'button', 'checkbox', 'radio', 'image', 'file', 'reset'].includes(t);
+                });
 
-                // Try to match 'user', 'email', 'phone' in name or aria-label
-                const likelyUsername = textLikeInputs.find(i =>
-                    i.name.includes('user') ||
-                    i.name.includes('email') ||
-                    (i.getAttribute('aria-label') || '').toLowerCase().includes('user') ||
-                    (i.getAttribute('aria-label') || '').toLowerCase().includes('email')
-                );
+                // Match likely username fields first (English & German terms)
+                const likelyUsername = nonSecretInputs.find(i => {
+                    const name = (i.name || '').toLowerCase();
+                    const aria = (i.getAttribute('aria-label') || '').toLowerCase();
+                    const placeholder = (i.getAttribute('placeholder') || '').toLowerCase();
+                    return name.includes('user') || name.includes('email') || name.includes('phone') ||
+                        aria.includes('user') || aria.includes('email') || aria.includes('phone') || aria.includes('benutzer') ||
+                        placeholder.includes('user') || placeholder.includes('email') || placeholder.includes('benutzer');
+                });
 
                 if (likelyUsername) {
-                    likelyUsername.focus();
+                    (likelyUsername as HTMLElement).focus();
                     return true;
                 }
-                if (textLikeInputs[0]) {
-                    textLikeInputs[0].focus();
+                if (nonSecretInputs[0]) {
+                    (nonSecretInputs[0] as HTMLElement).focus();
                     return true;
                 }
                 return false;
             });
 
-            if (!inputFound) throw new Error("Could not find any suitable login input field via Strategy 2.");
+            if (!inputFound) {
+                const currentUrl = this.page.url();
+                const pageTitle = await this.page.title().catch(() => 'Unknown');
+                logger.error(`Login input resolution failed. Current URL: ${currentUrl}, Page Title: "${pageTitle}"`);
+                try {
+                    await this.page.screenshot({ path: `logs/login_error_${this.username}_${Date.now()}.png` });
+                } catch { }
+                throw new Error(`Could not find any suitable login input field via Strategy 2 (URL: ${currentUrl}).`);
+            }
         }
 
         // At this point, focus should be on the field, or the standard selector worked.
-        const usernameSelector = await this.page.$('input[name="username"]');
+        const usernameSelector = await this.page.$(compoundUsernameSelector);
         if (usernameSelector) {
-            await this.page.type('input[name="username"]', this.username);
-            await this.page.type('input[name="password"]', this.password);
+            await usernameSelector.type(this.username);
+            const passwordSelector = await this.page.$('input[name="password"], input[type="password"]');
+            if (passwordSelector) {
+                await passwordSelector.type(this.password);
+            } else {
+                await this.page.keyboard.press('Tab');
+                await delay(500);
+                await this.page.keyboard.type(this.password);
+            }
         } else {
             // Fallback: Type blindly into focused element
             logger.info("Typing username into active element focus...");
@@ -844,8 +870,20 @@ export class IgClient {
         this.logger.info("Checking for Cookie Consent...");
         try {
             const cookieButton = await this.page.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.find(b => b.textContent?.includes('Allow all cookies') || b.textContent?.includes('Only allow essential cookies') || b.textContent?.includes('Decline optional cookies')) || null;
+                const elements = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                const phrases = [
+                    'allow all cookies', 'only allow essential cookies', 'decline optional cookies',
+                    'allow essential and optional cookies', 'allow essential cookies', 'allow cookies',
+                    'accept all cookies', 'accept optional cookies', 'accept cookies', 'accept',
+                    'alle cookies zulassen', 'nur essenzielle cookies zulassen', 'erforderliche cookies zulassen',
+                    'erforderliche und optionale cookies erlauben', 'optionalen cookies zustimmen',
+                    'cookies zulassen', 'alle akzeptieren', 'akzeptieren', 'zustimmen',
+                    'autoriser tous les cookies', 'permitir todas las cookies'
+                ];
+                return elements.find(el => {
+                    const text = (el.textContent || '').toLowerCase().trim();
+                    return phrases.some(p => text.includes(p));
+                }) || null;
             });
 
             const cookieButtonHandle = cookieButton.asElement();
