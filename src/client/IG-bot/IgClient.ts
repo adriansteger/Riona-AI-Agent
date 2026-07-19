@@ -193,6 +193,12 @@ export class IgClient {
 
             this.logger.info(`Session Check: URL=${currentUrl}, Inputs=${isLoginFieldPresent}, Link=${isLoginLinkPresent}, Button=${isLoginButtonPresent}, Nav=${isNavPresent}`);
 
+            if (this.isChallengeOrCheckpointUrl(currentUrl)) {
+                this.logger.warn(`Security challenge/checkpoint URL detected during session check: ${currentUrl}`);
+                await this.handleRecaptcha();
+                return;
+            }
+
             if (currentUrl.includes("/login/") || isLoginFieldPresent || isLoginLinkPresent || isLoginButtonPresent || !isNavPresent) {
                 this.logger.info("Session expired or new profile. Logging in with credentials...");
                 await this.loginWithCredentials();
@@ -527,7 +533,10 @@ export class IgClient {
         });
 
         const url = this.page.url();
-        if (!isLoggedIn || url.includes("/login/")) {
+        if (this.isChallengeOrCheckpointUrl(url)) {
+            logger.warn(`Security challenge/checkpoint URL detected after cookie login: ${url}`);
+            await this.handleRecaptcha();
+        } else if (!isLoggedIn || url.includes("/login/")) {
             logger.warn("Cookies are invalid (Login elements missing). Falling back to credentials login.");
             await this.loginWithCredentials();
         } else {
@@ -545,6 +554,15 @@ export class IgClient {
             });
         } else {
             logger.info("Skipping navigation as inputs are already present.");
+        }
+
+        const currentUrlAfterNav = this.page.url();
+        if (this.isChallengeOrCheckpointUrl(currentUrlAfterNav)) {
+            logger.warn(`Redirected to challenge/checkpoint page during login: ${currentUrlAfterNav}`);
+            await this.handleRecaptcha();
+            if (this.isChallengeOrCheckpointUrl(this.page.url())) {
+                throw new Error(`Account ${this.username} requires manual security challenge resolution (URL: ${currentUrlAfterNav}).`);
+            }
         }
 
         await this.handleCookieConsent(); // New handler
@@ -731,6 +749,11 @@ export class IgClient {
 
             if (!inputFound) {
                 const currentUrl = this.page.url();
+                if (this.isChallengeOrCheckpointUrl(currentUrl)) {
+                    logger.warn(`Strategy 2 failed because page is a challenge/checkpoint: ${currentUrl}`);
+                    await this.handleRecaptcha();
+                    throw new Error(`Account ${this.username} requires manual security verification (URL: ${currentUrl}).`);
+                }
                 const pageTitle = await this.page.title().catch(() => 'Unknown');
                 logger.error(`Login input resolution failed. Current URL: ${currentUrl}, Page Title: "${pageTitle}"`);
                 try {
@@ -931,12 +954,24 @@ export class IgClient {
         }
     }
 
+    public isChallengeOrCheckpointUrl(url: string): boolean {
+        if (!url) return false;
+        const lower = url.toLowerCase();
+        return lower.includes('/challenge/') ||
+               lower.includes('challenge_context=') ||
+               lower.includes('/update_risky_contactpoint/') ||
+               lower.includes('/integrity/checkpoint/') ||
+               lower.includes('/accounts/suspended/') ||
+               lower.includes('/confirm_contactpoint/') ||
+               lower.includes('/contact_point_verification/');
+    }
+
     async handleRecaptcha() {
         if (!this.page) return;
 
         try {
             const currentUrl = this.page.url();
-            const isChallengeUrl = currentUrl.includes('/challenge/');
+            const isChallengeUrl = this.isChallengeOrCheckpointUrl(currentUrl);
             const isRecaptchaUrl = currentUrl.includes('/recaptcha/') || currentUrl.includes('/auth_platform/recaptcha/');
 
             // Check for reCAPTCHA iframes or classic captcha elements
@@ -991,8 +1026,13 @@ export class IgClient {
                     const stillHasCaptcha = await this.page.evaluate(() => {
                         const iframes = Array.from(document.querySelectorAll('iframe'));
                         const recaptchaIframe = iframes.find(f => f.src.includes('recaptcha') || f.src.includes('google.com/recaptcha'));
-                        const challengeUrl = window.location.href.includes('/challenge/');
-                        const recaptchaUrl = window.location.href.includes('/recaptcha/') || window.location.href.includes('/auth_platform/recaptcha/');
+                        const href = window.location.href.toLowerCase();
+                        const challengeUrl = href.includes('/challenge/') ||
+                                           href.includes('challenge_context=') ||
+                                           href.includes('/update_risky_contactpoint/') ||
+                                           href.includes('/integrity/checkpoint/') ||
+                                           href.includes('/accounts/suspended/');
+                        const recaptchaUrl = href.includes('/recaptcha/') || href.includes('/auth_platform/recaptcha/');
                         return !!recaptchaIframe || challengeUrl || recaptchaUrl;
                     });
 
@@ -1067,7 +1107,7 @@ export class IgClient {
             await this.handleRecaptcha();
 
             const currentUrl = this.page.url();
-            const isChallengePage = currentUrl.includes('/challenge/');
+            const isChallengePage = this.isChallengeOrCheckpointUrl(currentUrl);
 
             if (isChallengePage) {
                 this.logger.warn(`DETECTED: Challenge Page Redirect (${currentUrl})`);
