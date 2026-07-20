@@ -160,6 +160,13 @@ export class IgClient {
             await this.loginWithCookies();
         } else if (this.userDataDir) {
             // With persistent profile, cookies are auto-loaded. Just check login state.
+            const initialUrl = this.page.url();
+            if (await this.isChallengeOrCheckpointPage()) {
+                this.logger.warn(`Browser is already on a security challenge/checkpoint page (${initialUrl}). Skipping home navigation...`);
+                await this.handleRecaptcha();
+                return;
+            }
+
             // 3. Navigate to Instagram (Robust Retry)
             try {
                 await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
@@ -963,7 +970,33 @@ export class IgClient {
                lower.includes('/integrity/checkpoint/') ||
                lower.includes('/accounts/suspended/') ||
                lower.includes('/confirm_contactpoint/') ||
-               lower.includes('/contact_point_verification/');
+               lower.includes('/contact_point_verification/') ||
+               lower.includes('accountscenter.instagram.com') ||
+               lower.includes('/contact_points/') ||
+               lower.includes('/personal_info/');
+    }
+
+    public async isChallengeOrCheckpointPage(): Promise<boolean> {
+        if (!this.page || this.page.isClosed()) return false;
+        const url = this.page.url();
+        if (this.isChallengeOrCheckpointUrl(url)) return true;
+
+        try {
+            return await this.page.evaluate(() => {
+                const text = (document.body.innerText || '').toLowerCase();
+                const host = window.location.hostname.toLowerCase();
+                return host.includes('accountscenter') ||
+                       text.includes('your email may not be secure') ||
+                       text.includes('confirm your email') ||
+                       text.includes('confirm your phone') ||
+                       text.includes('update email address') ||
+                       text.includes('suspect automated behavior') ||
+                       text.includes('account suspended') ||
+                       text.includes('account settings');
+            });
+        } catch {
+            return false;
+        }
     }
 
     async handleRecaptcha() {
@@ -971,7 +1004,7 @@ export class IgClient {
 
         try {
             const currentUrl = this.page.url();
-            const isChallengeUrl = this.isChallengeOrCheckpointUrl(currentUrl);
+            const isChallengeUrl = await this.isChallengeOrCheckpointPage();
             const isRecaptchaUrl = currentUrl.includes('/recaptcha/') || currentUrl.includes('/auth_platform/recaptcha/');
 
             // Check for reCAPTCHA iframes or classic captcha elements
@@ -1027,11 +1060,15 @@ export class IgClient {
                         const iframes = Array.from(document.querySelectorAll('iframe'));
                         const recaptchaIframe = iframes.find(f => f.src.includes('recaptcha') || f.src.includes('google.com/recaptcha'));
                         const href = window.location.href.toLowerCase();
+                        const host = window.location.hostname.toLowerCase();
                         const challengeUrl = href.includes('/challenge/') ||
                                            href.includes('challenge_context=') ||
                                            href.includes('/update_risky_contactpoint/') ||
                                            href.includes('/integrity/checkpoint/') ||
-                                           href.includes('/accounts/suspended/');
+                                           href.includes('/accounts/suspended/') ||
+                                           href.includes('/contact_points/') ||
+                                           href.includes('/personal_info/') ||
+                                           host.includes('accountscenter');
                         const recaptchaUrl = href.includes('/recaptcha/') || href.includes('/auth_platform/recaptcha/');
                         return !!recaptchaIframe || challengeUrl || recaptchaUrl;
                     });
@@ -1188,10 +1225,10 @@ export class IgClient {
                     const htmlSnapshot = await this.page.evaluate(() => document.body.innerHTML);
                     this.logger.error(`Debug HTML Snapshot (First 1000 chars): ${htmlSnapshot.substring(0, 1000)}`);
 
-                    // If we are on a challenge page and can't dismiss, we might be stuck.
+                    // If we are on a challenge page and can't dismiss, hand over to handleRecaptcha for manual intervention
                     if (isChallengePage) {
-                        this.logger.error("Stuck on Challenge page. Attempting force-navigation to Home...");
-                        await this.page.goto('https://www.instagram.com/', { waitUntil: 'networkidle2' });
+                        this.logger.warn("Stuck on Security Challenge/Checkpoint page. Handing over to handleRecaptcha for manual resolution...");
+                        await this.handleRecaptcha();
                     }
                 }
             }
@@ -2349,6 +2386,13 @@ this.logger.info("Waiting for page hydration...");
         this.logger.info(`Starting interaction session. Hourly Limits: Likes=${maxLikesPerHour}, Comments=${maxCommentsPerHour}. Session Target=${targetActions}.`);
 
         const page = this.page;
+
+        // Check if account is stuck on a security checkpoint before trying to load feed
+        if (await this.isChallengeOrCheckpointPage()) {
+            this.logger.warn("Cannot interact with posts: Account is on a security challenge/checkpoint page. Triggering handleRecaptcha...");
+            await this.handleRecaptcha();
+            return 0;
+        }
 
         // Wait for the feed to load
         try {
