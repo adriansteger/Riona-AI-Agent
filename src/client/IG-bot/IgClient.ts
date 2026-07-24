@@ -68,21 +68,47 @@ export class IgClient {
         return !!(this.browser && this.browser.isConnected());
     }
 
-    private async isLoggedIn(): Promise<boolean> {
+    public async isLoggedIn(maxWaitMs: number = 0): Promise<boolean> {
         if (!this.page) return false;
-        try {
-            return await this.page.evaluate(() => {
-                // Stricter checks: Public pages can have Search or even generic icons.
-                // We require stronger signals of a logged-in session.
-                const home = document.querySelector('svg[aria-label="Home"]'); // Feed
-                const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]'); // DMs
-                const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]'); // Hearts
-                const profile = document.querySelector('img[alt*="profile picture"]'); // Nav profile pic
+        const startTime = Date.now();
 
-                // Use a combination. 'Search' is too generic (public search exists).
-                return !!(home || direct || activity || profile);
-            });
-        } catch (e) { return false; }
+        while (true) {
+            try {
+                if (this.page.isClosed()) return false;
+                const currentUrl = this.page.url();
+
+                if (this.isChallengeOrCheckpointUrl(currentUrl)) {
+                    return false;
+                }
+
+                const loggedIn = await this.page.evaluate((targetUsername) => {
+                    const home = document.querySelector('svg[aria-label="Home"]');
+                    const direct = document.querySelector('svg[aria-label="Direct"]') || document.querySelector('svg[aria-label="Messenger"]');
+                    const activity = document.querySelector('svg[aria-label="Activity Feed"]') || document.querySelector('svg[aria-label="Notifications"]');
+                    const profile = document.querySelector('img[alt*="profile picture"]');
+                    const navBar = document.querySelector('div[role="navigation"]');
+                    const userLink = targetUsername ? document.querySelector(`a[href*="/${targetUsername.toLowerCase()}/"]`) : null;
+
+                    const loginInput = document.querySelector('input[name="username"], input[name="password"]');
+                    const loginBtn = Array.from(document.querySelectorAll('a, button')).some(el =>
+                        (el.textContent?.toLowerCase().trim() === 'log in' || el.textContent?.toLowerCase().trim() === 'anmelden') &&
+                        !el.querySelector('svg')
+                    );
+
+                    const positiveSignal = !!(home || direct || activity || profile || navBar || userLink);
+                    const negativeSignal = !!(loginInput || loginBtn);
+
+                    return positiveSignal && !negativeSignal;
+                }, this.username);
+
+                if (loggedIn) return true;
+            } catch (e) { }
+
+            if (Date.now() - startTime >= maxWaitMs) break;
+            await delay(1000);
+        }
+
+        return false;
     }
 
     private async gotoWithRetry(url: string, options: any = {}, retries = 3, page: puppeteer.Page | null = this.page) {
@@ -180,7 +206,7 @@ export class IgClient {
             this.logger.info(`Current URL after navigation: ${currentUrl}`);
 
             // Check if login fields are present
-            const isLoginFieldPresent = await this.page.$('input[name="username"], input[name="_username"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="benutzername" i]') !== null;
+            const isLoginFieldPresent = await this.page.$('input[name="username"], input[name="_username"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="mobile" i], input[aria-label*="phone" i], input[aria-label*="benutzername" i], input[placeholder*="username" i], input[placeholder*="mobile" i], input[placeholder*="phone" i], input[placeholder*="email" i], input[placeholder*="benutzername" i]') !== null;
 
             // Check for "Log In" button or link if inputs are missing (e.g. landing page)
             const isLoginLinkPresent = await this.page.$('a[href*="/accounts/login"]') !== null;
@@ -529,20 +555,13 @@ export class IgClient {
         });
 
         // Robust Check: verifying if we are truly logged in
-        // We look for the "Home", "Search" or "Profile" icons which only appear for logged-in users.
-        const isLoggedIn = await this.page.evaluate(() => {
-            const homeIcon = document.querySelector('svg[aria-label="Home"]');
-            const searchIcon = document.querySelector('svg[aria-label="Search"]');
-            const profileLink = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]');
-            const navBar = document.querySelector('div[role="navigation"]');
-
-            return !!(homeIcon || searchIcon || profileLink || navBar);
-        });
+        let isLoggedIn = await this.isLoggedIn(8000);
 
         const url = this.page.url();
         if (this.isChallengeOrCheckpointUrl(url)) {
             logger.warn(`Security challenge/checkpoint URL detected after cookie login: ${url}`);
             await this.handleRecaptcha();
+            isLoggedIn = await this.isLoggedIn(5000);
         } else if (!isLoggedIn || url.includes("/login/")) {
             logger.warn("Cookies are invalid (Login elements missing). Falling back to credentials login.");
             await this.loginWithCredentials();
@@ -551,7 +570,7 @@ export class IgClient {
         }
     }
 
-    private async loginWithCredentials(skipNavigation: boolean = false) {
+    private async loginWithCredentials(skipNavigation: boolean = false): Promise<void> {
         if (!this.page || !this.browser) throw new Error("Browser/Page not initialized");
         logger.info("Logging in with credentials...");
 
@@ -567,8 +586,22 @@ export class IgClient {
         if (this.isChallengeOrCheckpointUrl(currentUrlAfterNav)) {
             logger.warn(`Redirected to challenge/checkpoint page during login: ${currentUrlAfterNav}`);
             await this.handleRecaptcha();
-            if (this.isChallengeOrCheckpointUrl(this.page.url())) {
-                throw new Error(`Account ${this.username} requires manual security challenge resolution (URL: ${currentUrlAfterNav}).`);
+            
+            const postChallengeUrl = this.page.url();
+            if (this.isChallengeOrCheckpointUrl(postChallengeUrl)) {
+                throw new Error(`Account ${this.username} requires manual security challenge resolution (URL: ${postChallengeUrl}).`);
+            }
+
+            // Check if solving the challenge auto-logged us in!
+            if (await this.isLoggedIn(5000)) {
+                logger.info("Security challenge resolution successfully logged us in. Skipping credential re-entry.");
+                return;
+            }
+
+            // If challenge resolution did NOT log us in and left us on Home/landing page, re-navigate to login page
+            if (!postChallengeUrl.includes("/accounts/login")) {
+                logger.info("Not logged in after challenge resolution. Re-navigating to login page for credential entry...");
+                return await this.loginWithCredentials(false);
             }
         }
 
@@ -712,7 +745,7 @@ export class IgClient {
         }
 
 
-        const compoundUsernameSelector = 'input[name="username"], input[name="_username"], input[name="email"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="phone" i], input[aria-label*="benutzername" i], input[placeholder*="username" i], input[placeholder*="benutzername" i]';
+        const compoundUsernameSelector = 'input[name="username"], input[name="_username"], input[name="email"], input[autocomplete="username"], input[aria-label*="username" i], input[aria-label*="user" i], input[aria-label*="email" i], input[aria-label*="phone" i], input[aria-label*="mobile" i], input[aria-label*="benutzername" i], input[placeholder*="username" i], input[placeholder*="mobile" i], input[placeholder*="phone" i], input[placeholder*="email" i], input[placeholder*="benutzername" i]';
 
         try {
             // Strategy 1: Standard & Extended Compound Selectors
@@ -747,7 +780,8 @@ export class IgClient {
                     (likelyUsername as HTMLElement).focus();
                     return true;
                 }
-                if (nonSecretInputs[0]) {
+                // Only pick nonSecretInputs fallback if we are actually on an /accounts/login page
+                if (nonSecretInputs[0] && window.location.href.includes('/accounts/login')) {
                     (nonSecretInputs[0] as HTMLElement).focus();
                     return true;
                 }
@@ -761,6 +795,10 @@ export class IgClient {
                     await this.handleRecaptcha();
                     throw new Error(`Account ${this.username} requires manual security verification (URL: ${currentUrl}).`);
                 }
+                if (!currentUrl.includes('/accounts/login') && !(await this.isLoggedIn())) {
+                    logger.info(`Login inputs not found on ${currentUrl}. Navigating to /accounts/login/...`);
+                    return await this.loginWithCredentials(false);
+                }
                 const pageTitle = await this.page.title().catch(() => 'Unknown');
                 logger.error(`Login input resolution failed. Current URL: ${currentUrl}, Page Title: "${pageTitle}"`);
                 try {
@@ -770,17 +808,38 @@ export class IgClient {
             }
         }
 
-        // At this point, focus should be on the field, or the standard selector worked.
-        const usernameSelector = await this.page.$(compoundUsernameSelector);
-        if (usernameSelector) {
-            await usernameSelector.type(this.username);
-            const passwordSelector = await this.page.$('input[name="password"], input[type="password"]');
-            if (passwordSelector) {
-                await passwordSelector.type(this.password);
-            } else {
+        // Fill inputs using React synthetic event dispatching
+        const fillInputWithReactEvents = async (selector: string, value: string) => {
+            if (!this.page) return false;
+            const el = await this.page.$(selector);
+            if (!el) return false;
+            await el.click({ clickCount: 3 }).catch(() => {});
+            await el.focus();
+            await this.page.keyboard.type(value, { delay: 40 + Math.random() * 30 });
+            await el.evaluate((element: Element, val: string) => {
+                const input = element as HTMLInputElement;
+                input.focus();
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                if (setter) {
+                    setter.call(input, val);
+                } else {
+                    input.value = val;
+                }
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new Event('blur', { bubbles: true }));
+            }, value);
+            return true;
+        };
+
+        const usernameFilled = await fillInputWithReactEvents(compoundUsernameSelector, this.username);
+        if (usernameFilled) {
+            const passwordSelector = 'input[name="password"], input[type="password"]';
+            const passwordFilled = await fillInputWithReactEvents(passwordSelector, this.password);
+            if (!passwordFilled) {
                 await this.page.keyboard.press('Tab');
                 await delay(500);
-                await this.page.keyboard.type(this.password);
+                await this.page.keyboard.type(this.password, { delay: 50 });
             }
         } else {
             // Fallback: Type blindly into focused element
@@ -805,12 +864,19 @@ export class IgClient {
             await Promise.all([
                 this.page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 }).catch(() => logger.warn("Navigation timeout ignored")),
                 this.page.evaluate(() => {
-                    // Try to finding submit button and click it
-                    const submitBtn = document.querySelector('button[type="submit"]');
-                    if (submitBtn) (submitBtn as HTMLElement).click();
-                    else {
-                        // Fallback: Press Enter on the password field
-                        // We can't easily dispatch key events from inside analyze, but high-level keyboard press works outside
+                    // Try finding submit button, enable if disabled, and click
+                    const submitBtn = document.querySelector('button[type="submit"], button[role="button"]') as HTMLButtonElement;
+                    if (submitBtn) {
+                        submitBtn.removeAttribute('disabled');
+                        submitBtn.click();
+                    }
+                    const form = document.querySelector('form');
+                    if (form) {
+                        if (typeof (form as any).requestSubmit === 'function') {
+                            (form as any).requestSubmit();
+                        } else {
+                            form.submit();
+                        }
                     }
                 }),
                 this.page.keyboard.press('Enter')
@@ -824,38 +890,43 @@ export class IgClient {
         await this.handleNotificationPopup();
         await this.handleAutomatedBehaviorWarning();
 
-        // Handle "Save Info" page
-        // Sometimes it's a "Not Now" button on the main page, not a dialog
+        // Handle "Save Info" page / multi-lingual "Not Now" prompts
         const notNowButton = await this.page!.evaluateHandle(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            return buttons.find(b => b.textContent === 'Not Now') || null;
+            const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
+            const phrases = [
+                'not now', 'jetzt nicht', 'nicht jetzt', 'plus tard', 'ahora no',
+                'save info', 'informationen speichern', 'enregistrer'
+            ];
+            return buttons.find(b => {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                return phrases.some(p => txt === p || txt.includes(p));
+            }) || null;
         });
         const notNowButtonHandle = notNowButton.asElement();
         if (notNowButtonHandle) {
-            logger.info("Clicking 'Not Now' for Save Info...");
+            logger.info("Clicking 'Not Now' / 'Save Info' for login completion...");
             await notNowButtonHandle.evaluate((b: any) => b.click());
             await delay(3000);
         }
 
         // --- STRICT SUCCESS CHECK ---
-        const currentUrl = this.page!.url();
+        let currentUrl = this.page!.url();
 
-        // We re-use the robust "Positive" check from loginWithCookies
-        // We must ensure we are NOT on a public profile page (which has no nav bar).
-        const isLoggedIn = await this.page!.evaluate(() => {
-            const homeIcon = document.querySelector('svg[aria-label="Home"]');
-            // const searchIcon = document.querySelector('svg[aria-label="Search"]); // Search can be on public pages?
-            const navBar = document.querySelector('div[role="navigation"]');
-            const profileLink = document.querySelector('a[href*="/' + (window as any)._sharedData?.config?.viewer?.username + '/"]');
+        // Wait up to 12 seconds for session indicators to render after login submission / challenge solving
+        let isLoggedIn = await this.isLoggedIn(12000);
 
-            // "Negative" Check: Do we see "Log In" buttons?
-            const loginBtn = Array.from(document.querySelectorAll('a, button')).some(el =>
-                el.textContent?.toLowerCase().includes('log in') ||
-                el.getAttribute('href')?.includes('/accounts/login')
-            );
-
-            return !!(homeIcon || navBar || profileLink) && !loginBtn;
-        });
+        // Fallback: If indicators missing on post-challenge or home URL (?e=, challenge redirect params), navigate to home
+        if (!isLoggedIn && (currentUrl.includes('?e=') || currentUrl.includes('challenge') || currentUrl.startsWith('https://www.instagram.com/'))) {
+            logger.info(`Session indicators not immediately visible on ${currentUrl}. Navigating to Instagram home to verify session...`);
+            try {
+                await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+                await delay(3000);
+                isLoggedIn = await this.isLoggedIn(10000);
+                currentUrl = this.page!.url();
+            } catch (e) {
+                logger.warn(`Navigation to home during verification failed: ${e}`);
+            }
+        }
 
         if (!isLoggedIn) {
             // Check for specific error messages on page
@@ -1076,6 +1147,15 @@ export class IgClient {
                     if (!stillHasCaptcha) {
                         this.logger.info("✅ CAPTCHA Solved/Gone! Resuming execution...");
                         await delay(3000); // Settle time
+
+                        // If landed on post-challenge URL (e.g. ?e=1348020), navigate to home to render cleanly
+                        const postUrl = this.page.url();
+                        if (postUrl.includes('?e=') || postUrl.includes('challenge') || postUrl.includes('/accounts/')) {
+                            this.logger.info(`Post-challenge URL detected (${postUrl}). Navigating to Instagram home...`);
+                            await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: 'domcontentloaded' }).catch(() => {});
+                            await delay(3000);
+                        }
+
                         return;
                     }
 
