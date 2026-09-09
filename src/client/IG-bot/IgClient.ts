@@ -1641,6 +1641,8 @@ export class IgClient {
                     const primaryBtnEl = primaryBtn.asElement();
                     if (primaryBtnEl) {
                         await (primaryBtnEl as ElementHandle<Element>).click();
+                        await delay(2000);
+                    } else {
                         await delay(1000);
                     }
 
@@ -1829,12 +1831,68 @@ export class IgClient {
 
                 if (responseText && responseText !== "IGNORE") {
                     this.logger.info(`Generated response: "${responseText}"`);
-                    await page.type('div[role="textbox"][contenteditable="true"]', responseText);
+
+                    const messageInputSelectors = [
+                        'div[role="textbox"][contenteditable="true"]',
+                        'div[contenteditable="true"][role="textbox"]',
+                        'div[role="textbox"]',
+                        'div[contenteditable="true"]',
+                        'div[aria-label*="Message"][contenteditable="true"]',
+                        'div[aria-label*="Nachricht"][contenteditable="true"]',
+                        'div[aria-label*="Message"]',
+                        'div[aria-placeholder*="Message"]',
+                        'div[data-lexical-editor="true"]',
+                        'p[data-lexical-text="true"]',
+                        'textarea[placeholder*="Message"]',
+                        'textarea[aria-label*="Message"]',
+                        'textarea'
+                    ];
+
+                    let messageInputEl: ElementHandle<Element> | null = null;
+                    const findStart = Date.now();
+                    while (Date.now() - findStart < 12000) {
+                        if (page.isClosed()) break;
+                        for (const selector of messageInputSelectors) {
+                            try {
+                                const el = await page.$(selector);
+                                if (el) {
+                                    const isVisible = await el.evaluate(node => {
+                                        const r = (node as HTMLElement).getBoundingClientRect();
+                                        const style = window.getComputedStyle(node as HTMLElement);
+                                        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                                    }).catch(() => false);
+                                    if (isVisible) {
+                                        messageInputEl = el as ElementHandle<Element>;
+                                        break;
+                                    }
+                                }
+                            } catch { }
+                        }
+                        if (messageInputEl) break;
+                        await delay(500);
+                    }
+
+                    if (!messageInputEl) {
+                        throw new Error('Message input textbox element could not be found after waiting.');
+                    }
+
+                    await messageInputEl.focus().catch(() => {});
+                    await messageInputEl.click().catch(() => {});
+                    await delay(300);
+
+                    try {
+                        await messageInputEl.type(responseText, { delay: 20 });
+                    } catch {
+                        await page.keyboard.type(responseText, { delay: 20 });
+                    }
                     await delay(1000);
 
                     const sendBtn = await page.evaluateHandle(() => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        return buttons.find(b => b.textContent === 'Send') || null;
+                        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                        return buttons.find(b => {
+                            const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                            return txt === 'send' || txt === 'senden' || txt === 'envoyer';
+                        }) || null;
                     });
 
                     const sendBtnEl = sendBtn.asElement();
