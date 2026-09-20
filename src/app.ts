@@ -213,7 +213,7 @@ const processAccount = async (account: any, emailService?: EmailService) => {
 
     const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
     const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 50) : 0; // Increased default to 50
+    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 10) : 0; // Safe default 10/hr
 
     let isBlocked = true;
     let maxWaitTime = 0;

@@ -129,16 +129,10 @@ export class IgClient {
     }
 
     private async configurePage(page: puppeteer.Page) {
-        // 1. Spoof visibility
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
-            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
-        });
-
-        // 2. Default navigation timeout
+        // 1. Default navigation timeout
         page.setDefaultNavigationTimeout(60000);
 
-        // 3. Proxy authentication setup
+        // 2. Proxy authentication setup
         if (this.proxy) {
             try {
                 const proxyUrl = new URL(this.proxy);
@@ -153,11 +147,7 @@ export class IgClient {
             }
         }
 
-        // 4. User Agent spoofing
-        const userAgent = new UserAgent({ deviceCategory: "desktop" });
-        await page.setUserAgent(userAgent.toString());
-
-        // 5. Viewport sizing
+        // 3. Viewport sizing
         await page.setViewport({ width: 1280, height: 800 });
 
         // 6. Window Title for User Identification
@@ -464,12 +454,6 @@ export class IgClient {
                 } catch (moveErr) {
                     this.logger.warn(`Non-critical: CDP window move failed, using fallback or default position.`);
                 }
-
-                // SPOOF VISIBILITY: Trick the page into thinking it's always in the foreground
-                await this.page.evaluateOnNewDocument(() => {
-                    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
-                    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
-                });
 
                 // Fix for TimeoutError: Navigation timeout of 30000 ms exceeded (Slow RPi/Network)
                 this.page.setDefaultNavigationTimeout(60000);
@@ -2294,10 +2278,14 @@ this.logger.info("Waiting for page hydration...");
                     const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
                     if (canLike) {
                         try {
+                            // Dwell time: simulate viewing the image/video, reading caption
+                            await delay(getHumanLikeDelay(4500, 2000));
+
                             const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
                             const postUrl = await this.page.url();
                             const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
-                            const shouldSkip = Math.random() < 0.2; // 20% chance to skip
+                            // Organic browsing: real humans skip liking 60-70% of posts they view
+                            const shouldSkip = Math.random() < 0.65;
 
                             if (shouldSkip) {
                                 this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
@@ -2462,46 +2450,52 @@ this.logger.info("Waiting for page hydration...");
 
     /**
      * Simulates a human-like click by moving the mouse to the element first,
-     * hesitating, and then triggering the click via JS to avoid protocol timeouts.
+     * hesitating, and performing a true CDP mouse click (isTrusted: true).
+     * Falls back to Puppeteer element.click() or safe evaluate click if un-clickable by coordinates.
      */
     private async humanLikeClick(element: puppeteer.ElementHandle<Element>) {
         try {
-            // 1. Get Element Position
+            await element.evaluate((el: Element) => el.scrollIntoView({ block: 'center', inline: 'center' })).catch(() => {});
             const box = await element.boundingBox();
             if (box && this.page) {
-                // 2. Move Mouse to target with randomization (Human behavior)
-                // Add some randomness to the exact click point within the element
-                const x = box.x + (box.width / 2) + ((Math.random() - 0.5) * (box.width / 4));
-                const y = box.y + (box.height / 2) + ((Math.random() - 0.5) * (box.height / 4));
+                // Target a random coordinate within the inner 60% of the element
+                const x = box.x + (box.width * 0.2) + (Math.random() * box.width * 0.6);
+                const y = box.y + (box.height * 0.2) + (Math.random() * box.height * 0.6);
 
-                // Move the mouse visually (server sees this mouse event)
-                await this.page.mouse.move(x, y, { steps: 5 + Math.floor(Math.random() * 10) });
+                // Move mouse with natural steps
+                await this.page.mouse.move(x, y, { steps: 8 + Math.floor(Math.random() * 10) });
 
-                // 3. Hesitate (Simulate reaction time)
-                await delay(150 + Math.random() * 300);
+                // Simulate human hesitation / reaction time
+                await delay(120 + Math.random() * 200);
+
+                // Perform trusted CDP mouse click (isTrusted: true)
+                await this.page.mouse.click(x, y, { delay: 60 + Math.random() * 80 });
+                return;
             }
         } catch (e) {
-            // If bounding box calculation fails, we just proceed to the click as fallback
+            // Fallback if bounding box or mouse move fails
         }
 
-        // 4. Perform the click using JS Evaluate
-        // We use evaluate() instead of element.click() because the latter often causes
-        // "ProtocolError: Runtime.callFunctionOn timed out" on heavy pages or with stealth plugins.
-        // We handle SVG and other elements that don't implement direct .click() by searching for
-        // the closest clickable parent or dispatching a custom click event.
-        await element.evaluate((el: Element) => {
-            const clickable = el.closest('button, [role="button"], a');
-            if (clickable && typeof (clickable as any).click === 'function') {
-                (clickable as any).click();
-            } else if (typeof (el as any).click === 'function') {
-                (el as any).click();
-            } else if (el.parentElement && typeof (el.parentElement as any).click === 'function') {
-                (el.parentElement as any).click();
-            } else {
-                const ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                el.dispatchEvent(ev);
-            }
-        });
+        // Fallback 1: Native element.click with delay
+        try {
+            await element.click({ delay: 60 + Math.random() * 60 });
+            return;
+        } catch (e) {
+            // Fallback 2: JS evaluate click for non-standard or detached elements
+            await element.evaluate((el: Element) => {
+                const clickable = el.closest('button, [role="button"], a');
+                if (clickable && typeof (clickable as any).click === 'function') {
+                    (clickable as any).click();
+                } else if (typeof (el as any).click === 'function') {
+                    (el as any).click();
+                } else if (el.parentElement && typeof (el.parentElement as any).click === 'function') {
+                    (el.parentElement as any).click();
+                } else {
+                    const ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                    el.dispatchEvent(ev);
+                }
+            }).catch(() => {});
+        }
     }
 
     async interactWithPosts(options: {
@@ -2651,37 +2645,45 @@ this.logger.info("Waiting for page hydration...");
                     if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
                         console.log(`Skipping like: Hourly limit reached (${activityTracker.getRecentCount('likes')}/${maxLikesPerHour}).`);
                     } else if (ariaLabel === "Like" && likeButton) {
-                        console.log(`Liking post ${postIndex}...`);
-                        try {
-                            const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
-                            if (isConnected) {
-                                // Use human-like safe click (Move -> Delay -> JS Click)
-                                await this.humanLikeClick(likeButton as puppeteer.ElementHandle<Element>)
-                                    .catch(err => console.warn(`Failed to click like button: ${err}`));
-                                await delay(500 + Math.random() * 500); // Small random delay
+                        // Human dwell time: simulate reading/viewing the feed post
+                        await delay(getHumanLikeDelay(3500, 1500));
 
-                                // CHECK FOR AUTH WALL / SESSION EXPIRY IMMEDIATELLY
-                                await this.checkAuthWall();
-                                // CHECK FOR ACTION BLOCK (Soft Block)
-                                await this.checkActionBlock("Hashtag Like Action");
+                        // Organic feed browsing: skip ~60% of posts without liking
+                        const shouldSkip = Math.random() < 0.60;
+                        if (shouldSkip) {
+                            this.logger.info(`Simulating human behavior: browsing past feed post ${postIndex} without liking.`);
+                        } else {
+                            console.log(`Liking post ${postIndex}...`);
+                            try {
+                                const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                                if (isConnected) {
+                                    await this.humanLikeClick(likeButton as puppeteer.ElementHandle<Element>)
+                                        .catch(err => console.warn(`Failed to click like button: ${err}`));
+                                    await delay(getHumanLikeDelay(1500, 800));
 
-                                console.log(`Post ${postIndex} liked.`);
-                                activityTracker.trackAction('likes');
-                                actionsDone++;
+                                    // CHECK FOR AUTH WALL / SESSION EXPIRY IMMEDIATELLY
+                                    await this.checkAuthWall();
+                                    // CHECK FOR ACTION BLOCK (Soft Block)
+                                    await this.checkActionBlock("Feed Like Action");
 
-                                // Save to DB
-                                if (postUrl) {
-                                    await LikedPost.updateOne(
-                                        { username: this.username, postUrl },
-                                        { $set: { likedAt: new Date() } },
-                                        { upsert: true }
-                                    ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
+                                    console.log(`Post ${postIndex} liked.`);
+                                    activityTracker.trackAction('likes');
+                                    actionsDone++;
+
+                                    // Save to DB
+                                    if (postUrl) {
+                                        await LikedPost.updateOne(
+                                            { username: this.username, postUrl },
+                                            { $set: { likedAt: new Date() } },
+                                            { upsert: true }
+                                        ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
+                                    }
+                                } else {
+                                    console.warn(`Like button for post ${postIndex} is detached (skipping).`);
                                 }
-                            } else {
-                                console.warn(`Like button for post ${postIndex} is detached (skipping).`);
+                            } catch (e) {
+                                console.warn(`Error interacting with like button for post ${postIndex}:`, e);
                             }
-                        } catch (e) {
-                            console.warn(`Error interacting with like button for post ${postIndex}:`, e);
                         }
                     } else {
                         console.log(`Like button not found for post ${postIndex}.`);
