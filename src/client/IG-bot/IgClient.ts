@@ -2098,6 +2098,48 @@ export class IgClient {
         }
     }
 
+    private normalizePostPath(urlOrPath: string): string {
+        if (!urlOrPath) return '';
+        try {
+            const parsed = new URL(urlOrPath, 'https://www.instagram.com');
+            return parsed.pathname.replace(/\/+$/, '') + '/';
+        } catch {
+            return urlOrPath;
+        }
+    }
+
+    private async isPostLikedInDB(urlOrPath: string): Promise<boolean> {
+        const normPath = this.normalizePostPath(urlOrPath);
+        if (!normPath) return false;
+        const fullUrl = `https://www.instagram.com${normPath}`;
+        try {
+            return !!(await LikedPost.exists({
+                username: this.username,
+                $or: [
+                    { postUrl: normPath },
+                    { postUrl: fullUrl },
+                    { postUrl: { $regex: normPath.replace(/\//g, '\\/') } }
+                ]
+            }));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    private async recordPostLikedInDB(urlOrPath: string): Promise<void> {
+        const normPath = this.normalizePostPath(urlOrPath);
+        if (!normPath) return;
+        try {
+            await LikedPost.updateOne(
+                { username: this.username, postUrl: normPath },
+                { $set: { likedAt: new Date() } },
+                { upsert: true }
+            );
+        } catch (e) {
+            this.logger.warn(`Failed to save LikedPost to DB: ${e}`);
+        }
+    }
+
     async interactWithHashtags(hashtags: string[], options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; enableCommentLikes?: boolean; };
         limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
@@ -2121,7 +2163,7 @@ export class IgClient {
 
         let actionsDone = 0;
         const targetActions = limits?.likesPerSession || 10;
-        const maxPostsToInspect = targetActions * 4; // Safety limit to avoid infinite scrolling
+        const maxPostsToInspect = Math.max(targetActions * 8, 80); // Safety limit scaled to reach target with ~20% like rate
 
         // Create a copy of hashtags to try them sequentially/randomly
         const remainingTags = [...hashtags];
@@ -2243,7 +2285,7 @@ this.logger.info("Waiting for page hydration...");
                     const postUrl = postData.href!;
                     
                     // --- DB CHECK BEFORE OPENING ---
-                    const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
+                    const isAlreadyLikedDB = await this.isPostLikedInDB(postUrl);
 
                     if (isAlreadyLikedDB) {
                         this.logger.info(`[GRID SKIP] Post ${postsChecked + 1} (${postUrl}) already liked in DB. Not opening.`);
@@ -2282,60 +2324,61 @@ this.logger.info("Waiting for page hydration...");
                             await delay(getHumanLikeDelay(4500, 2000));
 
                             const strictUnlikeSelector = 'section svg[aria-label="Unlike"]';
-                            const postUrl = await this.page.url();
-                            const isAlreadyLikedDB = await LikedPost.exists({ username: this.username, postUrl });
-                            // Organic browsing: real humans skip liking 60-70% of posts they view
-                            const shouldSkip = Math.random() < 0.65;
+                            const modalUrl = await this.page.url();
+                            const isAlreadyLikedUI = !!(await this.page.$(strictUnlikeSelector));
+                            const isAlreadyLikedDB = await this.isPostLikedInDB(modalUrl);
 
-                            if (shouldSkip) {
-                                this.logger.info(`Simulating human behavior: randomly skipping post ${postsChecked + 1} without liking.`);
-                                await delay(getHumanLikeDelay(2000, 1000));
-                                interactionPerformed = true; // Random skip counts as a simulated action
-                            } else if (await this.page.$(strictUnlikeSelector)) {
-                                this.logger.info(`Post ${postsChecked + 1} already liked (UI).`);
-                                await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
+                            if (isAlreadyLikedUI || isAlreadyLikedDB) {
+                                this.logger.info(`Post ${postsChecked + 1} already liked (${isAlreadyLikedUI ? 'UI' : 'DB'}).`);
+                                await this.recordPostLikedInDB(modalUrl);
                             } else {
-                                let likeSelector = 'section svg[aria-label="Like"]';
-                                let likeButton = await this.page.$(likeSelector);
+                                // Organic browsing: like only ~20% of unliked posts (skip ~80%)
+                                const shouldSkip = Math.random() < 0.80;
 
-                                if (!likeButton) {
-                                    if (await this.page.$('svg[aria-label="Unlike"]')) {
-                                        this.logger.info(`Post ${postsChecked + 1} already liked (Fallback).`);
-                                    } else {
-                                        this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
-                                        const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
-                                        for (const btn of potentialButtons) {
-                                            const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]'));
-                                            if (!isComment) {
-                                                likeButton = btn as ElementHandle;
-                                                this.logger.info("Found fallback like button!");
-                                                break;
+                                if (shouldSkip) {
+                                    this.logger.info(`Simulating human behavior: browsing post ${postsChecked + 1} and skipping without liking (target 20% like rate).`);
+                                    await delay(getHumanLikeDelay(2000, 1000));
+                                    // Note: Do NOT set interactionPerformed = true! A skipped post does not count toward the target likes.
+                                } else {
+                                    let likeSelector = 'section svg[aria-label="Like"]';
+                                    let likeButton = await this.page.$(likeSelector);
+
+                                    if (!likeButton) {
+                                        if (await this.page.$('svg[aria-label="Unlike"]')) {
+                                            this.logger.info(`Post ${postsChecked + 1} already liked (Fallback).`);
+                                            await this.recordPostLikedInDB(modalUrl);
+                                        } else {
+                                            this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
+                                            const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
+                                            for (const btn of potentialButtons) {
+                                                const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]'));
+                                                if (!isComment) {
+                                                    likeButton = btn as ElementHandle;
+                                                    this.logger.info("Found fallback like button!");
+                                                    break;
+                                                }
+                                            }
+
+                                            if (!likeButton) {
+                                                this.logger.info(`Like button not found for post ${postsChecked + 1}.`);
                                             }
                                         }
-
-                                        if (!likeButton) {
-                                            this.logger.info(`Like button not found for post ${postsChecked + 1}.`);
-                                        }
                                     }
-                                }
 
-                                if (likeButton) {
-                                    const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
-                                    if (isConnected) {
-                                        this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
-                                        await this.humanLikeClick(likeButton);
-                                        await delay(getHumanLikeDelay(1500, 800));
+                                    if (likeButton) {
+                                        const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                                        if (isConnected) {
+                                            this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
+                                            await this.humanLikeClick(likeButton);
+                                            await delay(getHumanLikeDelay(1500, 800));
 
-                                        await this.checkActionBlock("Hashtag Like Action");
+                                            await this.checkActionBlock("Hashtag Like Action");
 
-                                        activityTracker.trackAction('likes');
-                                        interactionPerformed = true;
+                                            activityTracker.trackAction('likes');
+                                            interactionPerformed = true;
 
-                                        await LikedPost.updateOne(
-                                            { username: this.username, postUrl },
-                                            { $set: { likedAt: new Date() } },
-                                            { upsert: true }
-                                        ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
+                                            await this.recordPostLikedInDB(modalUrl);
+                                        }
                                     }
                                 }
                             }
@@ -2572,7 +2615,7 @@ this.logger.info("Waiting for page hydration...");
 
         let postIndex = 1; // Start with the first post
         let actionsDone = 0;
-        const maxPosts = 20; // Limit to prevent infinite scrolling
+        const maxPosts = Math.max(targetActions * 8, 60); // Scaled to reach target with ~20% like rate
 
         while (postIndex <= maxPosts && actionsDone < targetActions) {
             // Check for exit flag
@@ -2623,14 +2666,14 @@ this.logger.info("Waiting for page hydration...");
                     }
                 }
 
-                const isAlreadyLikedDB = postUrl ? await LikedPost.exists({ username: this.username, postUrl }) : false;
+                const isAlreadyLikedDB = postUrl ? await this.isPostLikedInDB(postUrl) : false;
 
                 if (isAlreadyLikedDB || ariaLabel === "Unlike") {
                     this.logger.info(`Skipping post ${postIndex}: already liked (${isAlreadyLikedDB ? 'DB' : 'UI'}).`);
                     
                     // Update DB if found in UI but not in DB
                     if (!isAlreadyLikedDB && postUrl) {
-                        await LikedPost.updateOne({ username: this.username, postUrl }, { $set: { likedAt: new Date() } }, { upsert: true }).catch(() => { });
+                        await this.recordPostLikedInDB(postUrl);
                     }
 
                     // Move to next post immediately
@@ -2648,10 +2691,10 @@ this.logger.info("Waiting for page hydration...");
                         // Human dwell time: simulate reading/viewing the feed post
                         await delay(getHumanLikeDelay(3500, 1500));
 
-                        // Organic feed browsing: skip ~60% of posts without liking
-                        const shouldSkip = Math.random() < 0.60;
+                        // Organic feed browsing: like only ~20% of posts (skip ~80%)
+                        const shouldSkip = Math.random() < 0.80;
                         if (shouldSkip) {
-                            this.logger.info(`Simulating human behavior: browsing past feed post ${postIndex} without liking.`);
+                            this.logger.info(`Simulating human behavior: browsing past feed post ${postIndex} without liking (target 20% like rate).`);
                         } else {
                             console.log(`Liking post ${postIndex}...`);
                             try {
@@ -2672,11 +2715,7 @@ this.logger.info("Waiting for page hydration...");
 
                                     // Save to DB
                                     if (postUrl) {
-                                        await LikedPost.updateOne(
-                                            { username: this.username, postUrl },
-                                            { $set: { likedAt: new Date() } },
-                                            { upsert: true }
-                                        ).catch(e => this.logger.warn(`Failed to save LikedPost to DB: ${e}`));
+                                        await this.recordPostLikedInDB(postUrl);
                                     }
                                 } else {
                                     console.warn(`Like button for post ${postIndex} is detached (skipping).`);

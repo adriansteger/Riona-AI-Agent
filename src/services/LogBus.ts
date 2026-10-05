@@ -77,7 +77,7 @@ export class LogBus extends EventEmitter {
                 try {
                     const json = JSON.parse(line);
                     parsed.push({
-                        timestamp: json.timestamp || new Date().toISOString(),
+                        timestamp: parseSafeIsoTimestamp(json.timestamp),
                         level: json.level || 'info',
                         message: json.message || '',
                         accountId
@@ -104,6 +104,17 @@ export interface LogBusTransportOptions extends Transport.TransportStreamOptions
     accountId: string;
 }
 
+function parseSafeIsoTimestamp(ts?: any): string {
+    if (!ts) return new Date().toISOString();
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) return d.toISOString();
+    // If it's a time-only string like "7:24:52 PM" or "19:24:52", attempt combining with today's date
+    const todayDate = new Date().toISOString().split('T')[0];
+    const combined = new Date(`${todayDate} ${ts}`);
+    if (!isNaN(combined.getTime())) return combined.toISOString();
+    return new Date().toISOString();
+}
+
 export class LogBusTransport extends Transport {
     private accountId: string;
     private bus: LogBus;
@@ -120,7 +131,7 @@ export class LogBusTransport extends Transport {
         });
 
         const entry: LogEntry = {
-            timestamp: info.timestamp || new Date().toISOString(),
+            timestamp: parseSafeIsoTimestamp(info.timestamp),
             level: info.level ? String(info.level).replace(/\u001b\[[0-9;]*m/g, '') : 'info',
             message: typeof info.message === 'string' ? info.message : JSON.stringify(info.message),
             accountId: this.accountId

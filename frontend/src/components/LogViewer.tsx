@@ -35,9 +35,18 @@ export const LogViewer: React.FC<Props> = ({
     }
   }, [filteredLogs, autoScroll]);
 
+  const formatTimestamp = (timestamp?: string): string => {
+    if (!timestamp) return '';
+    const d = new Date(timestamp);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    return timestamp;
+  };
+
   const handleCopy = () => {
     const text = filteredLogs
-      .map((l) => `[${l.timestamp}] [${l.level.toUpperCase()}]: ${l.message}`)
+      .map((l) => `[${formatTimestamp(l.timestamp)}] [${l.level.toUpperCase()}]: ${l.message}`)
       .join('\n');
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -215,7 +224,7 @@ export const LogViewer: React.FC<Props> = ({
               }}
             >
               <span style={{ color: 'var(--text-muted)', userSelect: 'none', minWidth: '70px' }}>
-                {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : ''}
+                {formatTimestamp(log.timestamp)}
               </span>
               <span
                 style={{
