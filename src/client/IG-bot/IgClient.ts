@@ -1584,9 +1584,10 @@ export class IgClient {
                 }
 
                 // Click the first one
+                let itemText = "";
                 try {
-                    const text = await currentRequests[0].evaluate(el => (el as HTMLElement).innerText.substring(0, 30));
-                    this.logger.info(`Clicking request item: "${text.replace(/\n/g, ' ')}..."`);
+                    itemText = await currentRequests[0].evaluate(el => (el as HTMLElement).innerText.substring(0, 50));
+                    this.logger.info(`Clicking request item: "${itemText.replace(/\n/g, ' ')}..."`);
                     await currentRequests[0].evaluate(el => (el as HTMLElement).click());
                 } catch (e) {
                     this.logger.warn(`Failed to click request item: ${e}`);
@@ -1600,15 +1601,66 @@ export class IgClient {
                     break;
                 }
 
+                // Detect if opened request is a group chat
+                const isGroupChat = await page.evaluate((textSnippet) => {
+                    if (textSnippet.includes(',') || textSnippet.includes(' and ') || textSnippet.includes(' und ')) return true;
+                    const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
+                    const headerText = (header?.textContent || '').trim();
+                    if (headerText.includes(',')) return true;
+                    if (/members|teilnehmer|personen|group/i.test(headerText)) return true;
+                    return false;
+                }, itemText);
+
+                if (isGroupChat) {
+                    this.logger.info(`Detected group chat spam request: "${itemText.replace(/\n/g, ' ')}". Declining/Deleting request to avoid spam.`);
+                    try {
+                        const deleteBtn = await page.evaluateHandle(() => {
+                            const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
+                            return buttons.find(b => {
+                                const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                                return txt === 'delete' || txt === 'löschen' || txt === 'supprimer' || txt === 'eliminar';
+                            }) || null;
+                        });
+                        const deleteBtnEl = deleteBtn.asElement();
+                        if (deleteBtnEl) {
+                            await deleteBtnEl.evaluate(b => (b as HTMLElement).click());
+                            await delay(1500);
+                            const confirmBtn = await page.evaluateHandle(() => {
+                                const dialog = document.querySelector('div[role="dialog"]');
+                                if (!dialog) return null;
+                                const buttons = Array.from(dialog.querySelectorAll('div[role="button"], button'));
+                                return buttons.find(b => {
+                                    const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                                    return txt === 'delete' || txt === 'löschen' || txt === 'supprimer' || txt === 'eliminar';
+                                }) || null;
+                            });
+                            const confirmBtnEl = confirmBtn.asElement();
+                            if (confirmBtnEl) {
+                                await confirmBtnEl.evaluate(b => (b as HTMLElement).click());
+                                await delay(2000);
+                                this.logger.info("Successfully deleted spam group request.");
+                            }
+                        }
+                    } catch (err) {
+                        this.logger.warn(`Failed to delete spam group request: ${err}`);
+                    }
+                    await this.gotoWithRetry("https://www.instagram.com/direct/requests/", { waitUntil: "networkidle2" }, 3, page);
+                    await delay(3000);
+                    continue;
+                }
+
                 // Find "Accept" button
                 const acceptBtn = await page.evaluateHandle(() => {
                     const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
-                    return buttons.find(b => (b.textContent?.trim() === 'Accept' || (b as HTMLElement).innerText?.trim() === 'Accept')) || null;
+                    return buttons.find(b => {
+                        const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                        return txt === 'accept' || txt === 'annehmen' || txt === 'aceptar' || txt === 'accepter';
+                    }) || null;
                 });
 
                 const acceptBtnEl = acceptBtn.asElement();
                 if (acceptBtnEl) {
-                    await (acceptBtnEl as ElementHandle<Element>).click();
+                    await acceptBtnEl.evaluate(b => (b as HTMLElement).click());
                     await delay(3000);
 
                     if (page.isClosed()) {
@@ -1616,19 +1668,40 @@ export class IgClient {
                         break;
                     }
 
-                    // Handle "Move to Primary" dialog if it appears
-                    const primaryBtn = await page.evaluateHandle(() => {
-                        const buttons = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button'));
-                        return buttons.find(b => (b.textContent?.trim() === 'Primary' || (b as HTMLElement).innerText?.trim() === 'Primary')) || null;
+                    // Handle "Move to Primary" / "Accept" confirmation dialog if it appears
+                    const dialogBtn = await page.evaluateHandle(() => {
+                        const dialog = document.querySelector('div[role="dialog"]');
+                        if (!dialog) return null;
+                        const buttons = Array.from(dialog.querySelectorAll('div[role="button"], button'));
+                        // 1. Look for Primary / Hauptordner
+                        const primary = buttons.find(b => {
+                            const txt = (b.textContent || (b as HTMLElement).innerText || '').toLowerCase();
+                            return txt.includes('primary') || txt.includes('haupt');
+                        });
+                        if (primary) return primary;
+                        // 2. Look for Accept / Join / Confirm
+                        const confirm = buttons.find(b => {
+                            const txt = (b.textContent || (b as HTMLElement).innerText || '').toLowerCase();
+                            return txt.includes('accept') || txt.includes('annehmen') || txt.includes('confirm') || txt.includes('bestätigen');
+                        });
+                        if (confirm) return confirm;
+                        // 3. Fallback: First button that is not Cancel / Abbrechen
+                        return buttons.find(b => {
+                            const txt = (b.textContent || (b as HTMLElement).innerText || '').toLowerCase();
+                            return !txt.includes('cancel') && !txt.includes('abbrechen') && !txt.includes('not now') && !txt.includes('nicht');
+                        }) || null;
                     });
 
-                    const primaryBtnEl = primaryBtn.asElement();
-                    if (primaryBtnEl) {
-                        await (primaryBtnEl as ElementHandle<Element>).click();
-                        await delay(2000);
+                    const dialogBtnEl = dialogBtn.asElement();
+                    if (dialogBtnEl) {
+                        await dialogBtnEl.evaluate(b => (b as HTMLElement).click());
+                        await delay(2500);
                     } else {
                         await delay(1000);
                     }
+
+                    // Wait for dialog to dismiss if still present
+                    await page.waitForFunction(() => !document.querySelector('div[role="dialog"]'), { timeout: 3000 }).catch(() => {});
 
                     this.logger.info(`Accepted DM request ${i + 1}/${maxToAccept}`);
 
@@ -1678,6 +1751,12 @@ export class IgClient {
                 }
                 return header?.textContent?.trim() || "User";
             });
+
+            // Prevent responding to group conversations
+            if (partnerUsername.includes(',') || partnerUsername.split(',').length > 1) {
+                this.logger.info(`Skipping reply: Detected group conversation (${partnerUsername}). Personal AI bots only respond to 1-on-1 DMs.`);
+                return false;
+            }
 
             // 2. Scrape last 10 messages for context
             const history = await page.evaluate(() => {
@@ -1797,7 +1876,7 @@ export class IgClient {
                 let responseText = result[0]?.response;
                 let newFacts = result[0]?.memory_updates || [];
 
-                if (newFacts.length > 0 && partnerUsername) {
+                if (newFacts.length > 0 && partnerUsername && partnerUsername !== "User") {
                     try {
                         await Contact.findOneAndUpdate(
                             { username: partnerUsername },
@@ -1816,48 +1895,87 @@ export class IgClient {
                 if (responseText && responseText !== "IGNORE") {
                     this.logger.info(`Generated response: "${responseText}"`);
 
-                    const messageInputSelectors = [
-                        'div[role="textbox"][contenteditable="true"]',
-                        'div[contenteditable="true"][role="textbox"]',
-                        'div[role="textbox"]',
-                        'div[contenteditable="true"]',
-                        'div[aria-label*="Message"][contenteditable="true"]',
-                        'div[aria-label*="Nachricht"][contenteditable="true"]',
-                        'div[aria-label*="Message"]',
-                        'div[aria-placeholder*="Message"]',
-                        'div[data-lexical-editor="true"]',
-                        'p[data-lexical-text="true"]',
-                        'textarea[placeholder*="Message"]',
-                        'textarea[aria-label*="Message"]',
-                        'textarea'
-                    ];
+                    // Dismiss any blocking dialogs if present
+                    await page.evaluate(() => {
+                        const dialog = document.querySelector('div[role="dialog"]');
+                        if (dialog) {
+                            const closeBtn = Array.from(dialog.querySelectorAll('button, div[role="button"]')).find(b => {
+                                const txt = (b.textContent || '').toLowerCase();
+                                return txt.includes('primary') || txt.includes('haupt') || txt.includes('not now') || txt.includes('nicht jetzt') || txt.includes('cancel') || txt.includes('schließen');
+                            });
+                            if (closeBtn) (closeBtn as HTMLElement).click();
+                        }
+                    }).catch(() => {});
 
                     let messageInputEl: ElementHandle<Element> | null = null;
                     const findStart = Date.now();
                     while (Date.now() - findStart < 12000) {
                         if (page.isClosed()) break;
-                        for (const selector of messageInputSelectors) {
-                            try {
-                                const el = await page.$(selector);
-                                if (el) {
-                                    const isVisible = await el.evaluate(node => {
-                                        const r = (node as HTMLElement).getBoundingClientRect();
-                                        const style = window.getComputedStyle(node as HTMLElement);
-                                        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-                                    }).catch(() => false);
-                                    if (isVisible) {
-                                        messageInputEl = el as ElementHandle<Element>;
-                                        break;
+
+                        // Query all candidates inside div[role="main"] or document
+                        const inputHandle = await page.evaluateHandle(() => {
+                            const main = document.querySelector('div[role="main"]') || document.body;
+                            const selectors = [
+                                'div[contenteditable="true"][role="textbox"]',
+                                'div[contenteditable="true"][data-lexical-editor="true"]',
+                                'div[contenteditable="true"][aria-label*="Message"]',
+                                'div[contenteditable="true"][aria-label*="Nachricht"]',
+                                'div[data-lexical-editor="true"]',
+                                'div[role="textbox"][contenteditable="true"]',
+                                'div[contenteditable="true"]',
+                                'div[role="textbox"]',
+                                'p[data-lexical-text="true"]',
+                                'textarea'
+                            ];
+
+                            const candidates = Array.from(main.querySelectorAll<HTMLElement>(selectors.join(', ')));
+                            for (const el of candidates) {
+                                const r = el.getBoundingClientRect();
+                                const s = window.getComputedStyle(el);
+                                // Ensure visible, non-zero dimensions, and located in message input area
+                                if (r.width > 50 && r.height > 15 && s.visibility !== 'hidden' && s.display !== 'none') {
+                                    if (r.top > 80) {
+                                        return el;
                                     }
                                 }
-                            } catch { }
+                            }
+                            return null;
+                        });
+
+                        const foundEl = inputHandle.asElement();
+                        if (foundEl) {
+                            messageInputEl = foundEl as ElementHandle<Element>;
+                            break;
                         }
-                        if (messageInputEl) break;
+
+                        // Check if chat is restricted or read-only
+                        const restrictedReason = await page.evaluate(() => {
+                            const text = document.querySelector('div[role="main"]')?.textContent?.toLowerCase() || '';
+                            if (text.includes("can't message this account") || text.includes("can't reply to this conversation") || text.includes("nicht auf diese unterhaltung antworten")) {
+                                return "Account is restricted or cannot receive messages";
+                            }
+                            if (text.includes("only admins can send messages") || text.includes("nur administratoren")) {
+                                return "Only admins can send messages in this conversation";
+                            }
+                            return null;
+                        });
+
+                        if (restrictedReason) {
+                            this.logger.warn(`Skipping reply to ${partnerUsername}: ${restrictedReason}.`);
+                            return false;
+                        }
+
                         await delay(500);
                     }
 
                     if (!messageInputEl) {
-                        throw new Error('Message input textbox element could not be found after waiting.');
+                        try {
+                            const screenshotPath = `logs/dm_input_missing_${partnerUsername.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.png`;
+                            await page.screenshot({ path: screenshotPath });
+                            this.logger.warn(`Message input element not found for ${partnerUsername}. Saved screenshot: ${screenshotPath}`);
+                        } catch { }
+                        this.logger.warn(`Message input textbox element could not be found for ${partnerUsername}. Skipping message.`);
+                        return false;
                     }
 
                     await messageInputEl.focus().catch(() => {});
