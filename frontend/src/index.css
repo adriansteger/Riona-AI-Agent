@@ -1,0 +1,134 @@
+:root {
+  --bg-canvas: #080a0d;
+  --bg-surface: #0f1318;
+  --bg-surface-elevated: #151a22;
+  --bg-surface-hover: #1b212b;
+  --bg-surface-active: #222936;
+
+  --border-subtle: #1e2631;
+  --border-medium: #2a3443;
+  --border-prominent: #3d4a5e;
+
+  --text-primary: #f2f5f8;
+  --text-secondary: #909bab;
+  --text-muted: #586374;
+  --text-inverse: #080a0d;
+
+  --accent: #ff5733;
+  --accent-hover: #ff6e4d;
+  --accent-active: #e64522;
+  --accent-glow: rgba(255, 87, 51, 0.2);
+
+  --state-running: #3fb950;
+  --state-running-bg: rgba(63, 185, 80, 0.12);
+  --state-running-border: rgba(63, 185, 80, 0.3);
+
+  --state-resting: #e3b341;
+  --state-resting-bg: rgba(227, 179, 65, 0.12);
+  --state-resting-border: rgba(227, 179, 65, 0.3);
+
+  --state-sleeping: #58a6ff;
+  --state-sleeping-bg: rgba(88, 166, 255, 0.12);
+  --state-sleeping-border: rgba(88, 166, 255, 0.3);
+
+  --state-paused: #39c5bb;
+  --state-paused-bg: rgba(57, 197, 187, 0.12);
+  --state-paused-border: rgba(57, 197, 187, 0.3);
+
+  --state-stopped: #7d8590;
+  --state-stopped-bg: rgba(125, 133, 144, 0.12);
+  --state-stopped-border: rgba(125, 133, 144, 0.3);
+
+  --state-error: #f85149;
+  --state-error-bg: rgba(248, 81, 73, 0.12);
+  --state-error-border: rgba(248, 81, 73, 0.3);
+
+  --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px var(--border-medium);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-canvas);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-medium);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-prominent);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* Utility Animations */
+@keyframes pulseGlow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.pulse-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulseGlow 2s infinite ease-in-out;
+}

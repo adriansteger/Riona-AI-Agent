@@ -7,7 +7,9 @@
     "postbuild": "copyfiles -u 1 \"src/**/*.json\" build",
     "train:link": "tsc && node build/Agent/training/WebsiteScraping.js",
     "train:audio": "tsc && node build/Agent/training/TrainWithAudio.js",
-    "train:youtube": "tsc && node build/Agent/training/youtubeURL.js"
+    "train:youtube": "tsc && node build/Agent/training/youtubeURL.js",
+    "dashboard:dev": "npm --prefix frontend run dev",
+    "dashboard:build": "npm --prefix frontend run build"
   },
   "keywords": [],
   "author": "",

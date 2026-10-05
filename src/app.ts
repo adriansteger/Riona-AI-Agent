@@ -1,27 +1,18 @@
 import express, { Application } from "express";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
-import helmet from "helmet"; // For securing HTTP headers
+import helmet from "helmet";
 import cors from "cors";
 import session from 'express-session';
+import path from 'path';
+import fs from 'fs';
 
 import logger, { setupErrorHandlers } from "./config/logger";
-import { setup_HandleError, ActivityTracker, pLimit, ScheduleTracker } from "./utils";
-import path from 'path';
+import { setup_HandleError } from "./utils";
 import { connectDB } from "./config/db";
 import apiRoutes from "./routes/api";
-import { getIgClient } from "./client/Instagram"; // Import getIgClient
-import { IGusername, IGpassword } from "./secret"; // Import credentials
-// import { main as twitterMain } from './client/Twitter'; //
-// import { main as githubMain } from './client/GitHub'; //
-import { IgClient } from "./client/IG-bot/IgClient";
-import accountConfig from "./config/accounts.json";
-import { createAccountLogger } from "./config/logger";
-import { chooseCharacter } from "./Agent";
-import jobConfig from "./config/job_accounts.json";
-
-import { JobClient } from "./client/JobBot/JobClient";
-import { EmailService } from "./services/EmailService";
+import dashboardRoutes from "./routes/dashboard";
+import { BotManager } from "./services/BotManager";
 
 // Set up process-level error handlers
 setupErrorHandlers();
@@ -40,14 +31,22 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-      "script-src": ["'self'"],
+      "script-src": ["'self'", "'unsafe-inline'"],
+      "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      "font-src": ["'self'", "https://fonts.gstatic.com"],
+      "connect-src": ["'self'"]
     },
   },
 }));
-app.use(cors());
-app.use(express.json()); // JSON body parsing
-app.use(express.urlencoded({ extended: true, limit: "1kb" })); // URL-encoded data
-app.use(cookieParser()); // Cookie parsing
+
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true, limit: "1kb" }));
+app.use(cookieParser());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'supersecretkey',
   resave: false,
@@ -60,9 +59,7 @@ app.use(session({
   },
 }));
 
-import fs from 'fs';
-
-// Serve static files from the 'public' directory
+// Serve static frontend build if present
 const frontendPath = path.join(__dirname, '../frontend/dist');
 const frontendExists = fs.existsSync(frontendPath);
 
@@ -71,472 +68,26 @@ if (frontendExists) {
 }
 
 // API Routes
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api', apiRoutes);
 
+// SPA Catch-All
 app.get('*', (_req, res) => {
   if (frontendExists && fs.existsSync(path.join(frontendPath, 'index.html'))) {
     res.sendFile('index.html', { root: frontendPath });
   } else {
-    res.status(200).json({ status: 'API is running', message: 'Frontend not found/built' });
+    res.status(200).json({ status: 'API is running', message: 'Frontend not found or not built yet.' });
   }
 });
 
-// Registry for active persistent sessions
-const activeSessions = new Map<string, IgClient>();
-
-// Global session limiter to enforce MAX_CONCURRENT_SESSIONS across independent loops
-const maxConcurrent = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '5', 10);
-const sessionLimit = pLimit(maxConcurrent);
-
-// Concurrency limiter for heavy interaction tasks (likes, comments, etc.) to prevent blocking DM checks
-const maxConcurrentInteractions = process.env.MAX_CONCURRENT_INTERACTIONS 
-  ? parseInt(process.env.MAX_CONCURRENT_INTERACTIONS, 10) 
-  : Math.min(maxConcurrent, 5);
-const interactionLimit = pLimit(maxConcurrentInteractions);
-
-
-const processAccount = async (account: any, emailService?: EmailService) => {
-  // Stagger start slightly (0-5s) to avoid CPU spikes if multiple launch at once
-  const stagger = Math.floor(Math.random() * 5000);
-  await new Promise(r => setTimeout(r, stagger));
-
-  const accountLogger = createAccountLogger(account.id);
-  accountLogger.info(`>>> Starting session for account: ${account.id} (${account.username}) <<<`);
-
-  try {
-    // Load specific character for this account
-    const character = chooseCharacter(account.character);
-    accountLogger.info(`Loaded character: ${character?.aiPersona?.name || "Default/Unknown"}`);
-
-    // --- SETTINGS MERGE ---
-    // 1. Get defaults from Character (or hard defaults)
-    const characterBehavior = character?.settings?.behavior || character?.behavior || { enableLikes: true, enableComments: true, enableCommentLikes: false };
-    const characterLimits = character?.limits || { likesPerHour: 10, commentsPerHour: 5 };
-
-    // 2. Get overrides from Account Config (accounts.json)
-    const accountBehavior = account.settings?.behavior || {};
-    const accountLimits = account.settings?.limits || {};
-
-    // 3. Merge: Account settings take precedence
-    const behavior = { ...characterBehavior, ...accountBehavior };
-    const limits = { ...characterLimits, ...accountLimits };
-    const scheduleSettings = account.settings?.schedule || {
-      sleepStartHour: 23, // 11 PM
-      sleepEndHour: 7, // 7 AM
-      minRestMinutes: 45, // 45 minutes
-      maxRestMinutes: 120 // 2 hours
-    };
-
-    // --- PRE-RUN AVAILABILITY CHECK ---
-    const trackerId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
-
-    // Check human-like schedule cycles
-    const scheduleTracker = new ScheduleTracker(trackerId);
-
-    if (ScheduleTracker.isSleepTime(scheduleSettings.sleepStartHour, scheduleSettings.sleepEndHour)) {
-      // Sleep over midnight logic or simple sleep time logic
-      accountLogger.info(`Account is currently in a sleep window (${scheduleSettings.sleepStartHour}:00 - ${scheduleSettings.sleepEndHour}:00). Skipping check.`);
-
-      // Critical: Ensure session is closed during sleep to save memory
-      const existingClient = activeSessions.get(account.id);
-      if (existingClient) {
-        await existingClient.close();
-        activeSessions.delete(account.id);
-        accountLogger.info("Closed persistent session for sleep cycle.");
-      }
-      return;
-    }
-
-    let isDMOnlyRun = false;
-    const nextActiveTime = scheduleTracker.getNextActiveTime();
-    if (Date.now() < nextActiveTime) {
-      if (behavior.enableAutoDMs === true) {
-        const lastDMCheck = scheduleTracker.getLastDMCheckTime();
-        const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
-        if (Date.now() - lastDMCheck >= dmIntervalMs) {
-          isDMOnlyRun = true;
-          accountLogger.info(`Account is resting, but executing a quick, headless DM-only check (last checked ${Math.round((Date.now() - lastDMCheck) / 60000)}m ago).`);
-        }
-      }
-
-      if (!isDMOnlyRun) {
-        // Find remaining wait
-        const remainingMinutes = Math.ceil((nextActiveTime - Date.now()) / 60000);
-        accountLogger.info(`Account is resting. Waiting ~${remainingMinutes} minutes before next active cycle.`);
-
-        // Critical: Ensure session is closed during rest to save memory
-        const existingClient = activeSessions.get(account.id);
-        if (existingClient) {
-          await existingClient.close();
-          activeSessions.delete(account.id);
-          accountLogger.info("Closed persistent session for rest cycle.");
-        }
-        return;
-      }
-    }
-
-    // If active cycle is due, check if the heavy interaction slot is available
-    if (!isDMOnlyRun && Date.now() >= nextActiveTime) {
-      if (interactionLimit.activeCount >= interactionLimit.concurrency) {
-        accountLogger.debug(`Active cycle is due, but the heavy interaction slot is busy (${interactionLimit.activeCount}/${interactionLimit.concurrency} active).`);
-        if (behavior.enableAutoDMs === true) {
-          const lastDMCheck = scheduleTracker.getLastDMCheckTime();
-          const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
-          if (Date.now() - lastDMCheck >= dmIntervalMs) {
-            isDMOnlyRun = true;
-            accountLogger.info(`Executing a quick, headless DM-only check instead of full interaction cycle.`);
-          }
-        }
-
-        if (!isDMOnlyRun) {
-          accountLogger.debug(`Postponing active cycle. Retrying in next loop iteration.`);
-          return;
-        }
-      }
-    }
-
-
-    const activityTracker = new ActivityTracker(trackerId);
-
-    // --- LIKES PER SESSION RANDOMIZATION ---
-    let sessionLikesTarget = 10;
-    if (limits.likesPerSession) {
-      if (typeof limits.likesPerSession === 'string' && limits.likesPerSession.includes('-')) {
-        const [min, max] = limits.likesPerSession.split('-').map(Number);
-        sessionLikesTarget = Math.floor(Math.random() * (max - min + 1)) + min;
-      } else {
-        sessionLikesTarget = Number(limits.likesPerSession);
-      }
-    }
-    const sessionLimits = { ...limits, likesPerSession: sessionLikesTarget };
-    accountLogger.info(`Session interaction target: ${sessionLikesTarget} actions.`);
-
-    const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
-    const msToNextComment = (behavior.enableComments !== false) ? activityTracker.getTimeUntilAvailable('comments', limits.commentsPerHour) : 0;
-    const msToNextDM = (behavior.enableAutoDMs === true) ? activityTracker.getTimeUntilAvailable('dms', limits.dmsPerHour || 10) : 0; // Safe default 10/hr
-
-    let isBlocked = true;
-    let maxWaitTime = 0;
-
-    if (isDMOnlyRun) {
-      isBlocked = (behavior.enableAutoDMs === true && msToNextDM > 0);
-    } else {
-      // Check if at least ONE enabled action is available
-      if (behavior.enableLikes !== false && msToNextLike === 0) isBlocked = false;
-      if (behavior.enableComments !== false && msToNextComment === 0) isBlocked = false;
-      if (behavior.enableAutoDMs === true && msToNextDM === 0) isBlocked = false;
-    }
-
-    if (isBlocked) {
-      if (isDMOnlyRun) {
-        const dmWait = Math.ceil(msToNextDM / 60000);
-        accountLogger.warn(`DM-only check skipped: Auto DM is on rate limit cooldown. Waiting ~${dmWait}m.`);
-      } else {
-        const waits = [];
-        if (behavior.enableLikes !== false) waits.push(msToNextLike);
-        if (behavior.enableComments !== false) waits.push(msToNextComment);
-        if (behavior.enableAutoDMs === true) waits.push(msToNextDM);
-
-        maxWaitTime = waits.length > 0 ? Math.min(...waits) : 0;
-
-        const waitMinutes = Math.ceil(maxWaitTime / 60000);
-        const dmWait = Math.ceil(msToNextDM / 60000);
-        const likeWait = Math.ceil(msToNextLike / 60000);
-
-        accountLogger.warn(`All enabled actions are on cooldown. Waiting ~${waitMinutes}m. (Likes: ${likeWait}m, DMs: ${dmWait}m)`);
-      }
-
-      // Critical: If blocked, ensure we close the session to save RAM
-      const existingClient = activeSessions.get(account.id);
-      if (existingClient) {
-        await existingClient.close();
-        activeSessions.delete(account.id);
-        accountLogger.info("Closed persistent session due to rate limits.");
-      }
-      return;
-    }
-
-    // --- REUSE OR CREATE CLIENT AND RUN INTERACTION ---
-    try {
-      const runSession = async () => {
-        let igClient = activeSessions.get(account.id);
-
-        // If client exists but disconnected, clear it
-        if (igClient && !igClient.isConnected()) {
-          activeSessions.delete(account.id);
-          igClient = undefined;
-        }
-
-        if (!igClient) {
-          const headlessMode = account.settings?.headless !== undefined
-            ? !!account.settings.headless
-            : (process.env.HEADLESS !== undefined
-                ? process.env.HEADLESS === 'true'
-                : isDMOnlyRun);
-
-          // Initialize New Client
-          igClient = new IgClient({
-            username: account.username,
-            password: account.password,
-            userDataDir: account.userDataDir,
-            proxy: account.proxy,
-            languages: account.settings?.languages,
-            defaultLanguage: account.settings?.defaultLanguage,
-            headless: headlessMode
-          }, accountLogger, character, emailService);
-
-          activeSessions.set(account.id, igClient);
-        } else {
-          accountLogger.info("Reusing active browser session.");
-        }
-
-        try {
-          await igClient.init(); // Idempotent now
-
-          accountLogger.info(`Interacting with behavior: Like=${behavior.enableLikes}, Comment=${behavior.enableComments}`);
-          accountLogger.info(`Safety Limits applied: MaxLikes=${limits.likesPerHour}, MaxComments=${limits.commentsPerHour}`);
-
-          const hashtags = account.settings?.hashtags || [];
-          const hashtagMix = account.settings?.hashtagMix !== undefined ? account.settings.hashtagMix : 0.5; // Default 50/50
-
-          // Check for Auto DMs if enabled in settings
-          if (behavior.enableAutoDMs) {
-            accountLogger.info("Checking for DMs (enabled in settings)...");
-            await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
-          }
-
-          // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
-          let actionsCompleted = 0;
-          if (!isDMOnlyRun) {
-            const useHashtags = hashtags.length > 0 && Math.random() < hashtagMix;
-
-            if (useHashtags) {
-              accountLogger.info(`Chosen Strategy: HASHTAG interaction (Probability: ${hashtagMix}, Tags: ${hashtags.length})`);
-              actionsCompleted = await igClient.interactWithHashtags(hashtags, { behavior, limits: sessionLimits });
-              
-              if (actionsCompleted === 0) {
-                accountLogger.warn("Hashtag interaction completed with 0 actions. Attempting fallback FEED strategy...");
-                actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
-              }
-            } else {
-              accountLogger.info(`Chosen Strategy: FEED interaction (Probability: ${1 - (hashtags.length > 0 ? hashtagMix : 0)})`);
-              actionsCompleted = await igClient.interactWithPosts({ behavior, limits: sessionLimits });
-            }
-          }
-
-          // Store actionsCompleted on the client instance so the finally block can access it
-          (igClient as any).actionsCompletedThisSession = actionsCompleted;
-
-        } catch (err) {
-          throw err;
-        } finally {
-          // ALWAYS CLOSE after session finishes to save RAM
-          const existingClient = activeSessions.get(account.id);
-          let actionsCompleted = 0;
-          let dmsProcessed = false;
-          if (existingClient) {
-              actionsCompleted = (existingClient as any).actionsCompletedThisSession || 0;
-              dmsProcessed = (existingClient as any).dmsProcessedThisSession || false;
-              accountLogger.info(`Closing session for ${account.id} before rest period.`);
-              await existingClient.close();
-              activeSessions.delete(account.id);
-          }
-
-          // Update the Rest/DM Cycles
-          if (isDMOnlyRun) {
-            const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 2);
-            const dmIntervalMs = (account.settings?.schedule?.dmCheckIntervalMinutes || 2) * 60 * 1000;
-            scheduleTracker.setLastDMCheckTime(Date.now() + (nextCheckMinutes * 60000) - dmIntervalMs);
-            accountLogger.info(`DM-only check completed. Next DM check available in ~${nextCheckMinutes} minutes.`);
-          } else {
-            // Update the Rest Cycle
-            let restDelayMs;
-            if (actionsCompleted === 0) {
-              accountLogger.warn("Performed 0 interactions in this session. Scheduling a short retry delay of 5 minutes instead of a full rest cycle.");
-              restDelayMs = 5 * 60 * 1000;
-            } else {
-              restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
-            }
-            scheduleTracker.setNextActiveTime(Date.now() + restDelayMs);
-            accountLogger.info(`Account rests. Next active cycle set in ~${Math.round(restDelayMs / 60000)} minutes.`);
-          }
-
-          accountLogger.info(`<<< Session finished for account: ${account.id} >>>`);
-        }
-      };
-
-      if (isDMOnlyRun) {
-        await sessionLimit(runSession);
-      } else {
-        await interactionLimit(async () => {
-          await sessionLimit(runSession);
-        });
-      }
-    } catch (err) {
-      throw err;
-    }
-
-
-  } catch (error: any) {
-    accountLogger.error(`Error processing account ${account.id}: ${error}`);
-    if (emailService) {
-      // Use the passed emailService (which is the GLOBAL alert service if configured)
-      emailService.sendErrorAlert(account.username, error.message || String(error), "Account Processing Crash").catch(() => { });
-    }
-  }
-};
-
-// Global persisted Alert Email Service to prevent handle leaks
-let globalAlertEmailService: EmailService | undefined;
-
-const startAccountLoop = async (account: any, emailService?: EmailService) => {
-  const accountLogger = createAccountLogger(account.id);
-  accountLogger.info(`Starting independent loop for account: ${account.id} (${account.username})`);
-  while (true) {
-    try {
-      await processAccount(account, emailService);
-    } catch (err) {
-      accountLogger.error(`Error in loop for account ${account.id}: ${err}`);
-    }
-    // Check schedule again every 30 seconds
-    await new Promise(resolve => setTimeout(resolve, 30000));
-  }
-};
-
-// Define runInstagram
-const runInstagram = async () => {
-  logger.info("Starting Multi-Account Instagram Bot (Independent Loops)...");
-
-  // Force cast accountConfig to any to avoid strict type checking issues with JSON import if not enabled
-  const accounts: any[] = accountConfig;
-  const enabledAccounts = accounts.filter(a => a.enabled);
-
-  if (enabledAccounts.length === 0) {
-    logger.info("No enabled Instagram accounts found. Skipping Instagram Bot.");
-    return;
-  }
-
-  logger.info(`Found ${enabledAccounts.length} enabled Instagram accounts: ${enabledAccounts.map(a => a.id).join(', ')}`);
-
-  // Check for specific IG_ALERT credentials first, then fallback to generic EMAIL credentials
-  const mailUser = process.env.IG_ALERT_EMAIL_USER || process.env.EMAIL_USER;
-  const mailPass = process.env.IG_ALERT_EMAIL_PASS || process.env.EMAIL_PASS;
-  const mailHost = process.env.IG_ALERT_EMAIL_HOST || process.env.EMAIL_HOST;
-  const mailPort = process.env.IG_ALERT_EMAIL_PORT || process.env.EMAIL_PORT || '465';
-  const mailSecure = process.env.IG_ALERT_EMAIL_SECURE || process.env.EMAIL_SECURE || 'true';
-  const mailFrom = process.env.IG_ALERT_EMAIL_FROM || process.env.EMAIL_FROM;
-  const mailService = process.env.IG_ALERT_EMAIL_SERVICE || process.env.EMAIL_SERVICE;
-  const mailTo = process.env.IG_ALERT_EMAIL_TO || process.env.EMAIL_ALERTS_TO || mailUser;
-
-  // Initialize Global Email Service for Alerts ONCE
-  if (!globalAlertEmailService) {
-    if (mailUser && mailPass) {
-      globalAlertEmailService = new EmailService({
-        host: mailHost,
-        port: parseInt(mailPort),
-        secure: mailSecure === 'true',
-        user: mailUser,
-        pass: mailPass,
-        to: mailTo!,
-        from: mailFrom,
-        service: mailService
-      });
-      logger.info(`Global Email Alert System initialized (Sender: ${mailFrom || mailUser}, Config: ${mailHost || mailService})`);
-    } else {
-      logger.warn("Email alert system skipped (Missing Credentials). CAPTCHA alerts will not be sent.");
-    }
-  }
-
-  logger.info(`Running with MAX_CONCURRENT_SESSIONS: ${maxConcurrent}`);
-
-  // Start independent loops for all enabled accounts
-  enabledAccounts.forEach(account => {
-    startAccountLoop(account, globalAlertEmailService);
-  });
-};
-
-const runAgents = async () => {
-  // Start the Instagram loops once (they run indefinitely in the background)
-  await runInstagram();
-
-  // Run the Job Bot loop indefinitely
-  while (true) {
-    logger.info("Starting Job Bot...");
-    await runJobBot();
-    logger.info("Job Bot finished.");
-
-    // Wait for 30 seconds before checking Job Bot again
-    await new Promise((resolve) => setTimeout(resolve, 30000));
-  }
-};
-
-// Global persisted JobBot instances to prevent handle leaks (EMFILE)
-let globalJobEmailService: EmailService | null = null;
-let globalJobClient: JobClient | null = null;
-
-const runJobBot = async () => {
-  // Check if Job Bot is enabled in config
-  // We assume the first bot config controls the master switch for now, or check any enabled
-  const isEnabled = (jobConfig as any).jobBots?.some((bot: any) => bot.enabled);
-
-  if (!isEnabled) {
-    logger.info("Job Bot is disabled in job_accounts.json. Skipping.");
-    return;
-  }
-
-  logger.info("Starting Job Search Bot (Env/API Config)...");
-
-  // Email Config from Env
-  const emailConfig = {
-    host: process.env.EMAIL_HOST || '',
-    port: parseInt(process.env.EMAIL_PORT || '465'),
-    secure: process.env.EMAIL_SECURE === 'true',
-    user: process.env.EMAIL_USER || '',
-    pass: process.env.EMAIL_PASS || '',
-    to: '', // Will be set dynamically by JobClient -> checkUserPreferences
-    from: process.env.EMAIL_FROM,
-    service: process.env.EMAIL_SERVICE
-  };
-
-  if (!emailConfig.user || !emailConfig.pass) {
-    logger.warn("Missing EMAIL_USER or EMAIL_PASS in .env. Skipping Job Bot.");
-    return;
-  }
-
-  try {
-    if (!globalJobClient) {
-      if (!globalJobEmailService) {
-        globalJobEmailService = new EmailService(emailConfig);
-      }
-
-      // Default config (will be overridden by Instagram AI Agent API)
-      // Use platforms defined in job_accounts.json (first bot)
-      const botConfig = jobConfig.jobBots?.[0];
-      const platforms = botConfig?.preferences?.platforms || ['indeed', 'ziprecruiter', 'weworkremotely'];
-      const proxy = botConfig?.proxy;
-
-      const defaultJobConfig = {
-        keywords: [],
-        location: 'Remote',
-        platforms: platforms,
-        proxy: proxy
-      };
-
-      globalJobClient = new JobClient(globalJobEmailService, defaultJobConfig);
-      await globalJobClient.init();
-    }
-
-    await globalJobClient.runSearch();
-    // Keep browser open per user request, because client is now global!
-
-  } catch (error) {
-    logger.error(`Error in Job Bot: ${error}`);
-  }
-};
-
-runAgents().catch((error) => {
-  setup_HandleError(error, "Error running agents:");
-});
+// Initialize and bootstrap BotManager
+export const botManager = BotManager.getInstance();
+
+try {
+  botManager.bootstrap();
+} catch (error) {
+  setup_HandleError(error, "Error bootstrapping bots:");
+}
 
 // Error handling
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

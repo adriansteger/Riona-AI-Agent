@@ -3,6 +3,7 @@ import 'winston-daily-rotate-file';
 import path from 'path';
 import fs from 'fs';
 import { setup_HandleError } from "../utils";
+import { LogBusTransport } from "../services/LogBus";
 
 // Ensure the logs directory exists
 const logDir = path.join(process.cwd(), 'logs');
@@ -72,6 +73,7 @@ const logger = createLogger({
                 format.simple()
             ),
         }),
+        new LogBusTransport({ accountId: 'system' }),
         new transports.DailyRotateFile({
             filename: "logs/system/%DATE%-combined.log",
             datePattern: "YYYY-MM-DD",
@@ -160,6 +162,7 @@ export const createAccountLogger = (accountId: string) => {
                     })
                 )
             }),
+            new LogBusTransport({ accountId }),
             new transports.DailyRotateFile({
                 filename: path.join(accountLogDir, "%DATE%.log"),
                 datePattern: "YYYY-MM-DD",
