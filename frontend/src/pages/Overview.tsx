@@ -77,6 +77,10 @@ export const Overview: React.FC = () => {
   const totalComments1h = accounts.reduce((acc, curr) => acc + (curr.activity.comments1h || 0), 0);
   const totalDMs1h = accounts.reduce((acc, curr) => acc + (curr.activity.dms1h || 0), 0);
 
+  const totalLikesToday = accounts.reduce((acc, curr) => acc + (curr.activity.likesToday ?? curr.activity.likes24h ?? 0), 0);
+  const totalCommentsToday = accounts.reduce((acc, curr) => acc + (curr.activity.commentsToday ?? curr.activity.comments24h ?? 0), 0);
+  const totalDMsToday = accounts.reduce((acc, curr) => acc + (curr.activity.dmsToday ?? curr.activity.dms24h ?? 0), 0);
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Navbar />
@@ -151,6 +155,57 @@ export const Overview: React.FC = () => {
                 <Send size={14} color="#3fb950" />
                 <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {totalDMs1h}
+                </span>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>dms</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Today Daily Activity Metrics */}
+          <div
+            style={{
+              backgroundColor: 'var(--bg-surface)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-md)',
+              padding: '16px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Fleet Volume (Today)
+              </div>
+              <span
+                style={{
+                  fontSize: '10px',
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)',
+                  backgroundColor: 'var(--bg-surface-elevated)',
+                  padding: '1px 5px',
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                00:00 - NOW
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginTop: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Heart size={14} color="var(--accent)" />
+                <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  {totalLikesToday}
+                </span>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>likes</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <MessageCircle size={14} color="#58a6ff" />
+                <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  {totalCommentsToday}
+                </span>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>comments</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Send size={14} color="#3fb950" />
+                <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  {totalDMsToday}
                 </span>
                 <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>dms</span>
               </div>

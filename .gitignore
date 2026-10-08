@@ -130,6 +130,9 @@ logged_in.png
 
 # Accounts config file (contains sensitive data)
 src/config/accounts.json
+src/config/accounts.json.bak
+src/config/*.bak
+*.bak
 src/Agent/training/ascotech.txt
 profiles
 src/Agent/characters/Ascotech.Agent.json

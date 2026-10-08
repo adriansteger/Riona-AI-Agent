@@ -57,7 +57,7 @@ export const Navbar: React.FC = () => {
           </div>
           <div>
             <div style={{ fontWeight: 700, fontSize: '15px', letterSpacing: '0.05em' }}>
-              RIONA <span style={{ color: 'var(--accent)', fontSize: '11px' }}>CONTROL ROOM</span>
+              INSTAGRAM <span style={{ color: 'var(--accent)', fontSize: '11px' }}>AI AGENT CONTROL ROOM</span>
             </div>
             <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
               AUTONOMOUS INSTAGRAM & JOB AGENTS

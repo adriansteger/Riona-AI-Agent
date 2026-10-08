@@ -85,7 +85,7 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
         <StatusBadge state={state} activeSession={activeSession} />
       </div>
 
-      {/* Activity Counters (1h window vs limits) */}
+      {/* Activity Counters (1h window vs limits & Today totals) */}
       <div
         style={{
           display: 'grid',
@@ -100,10 +100,13 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-muted)' }}>
             <Heart size={12} color="var(--accent)" />
-            Likes 1h
+            Likes
           </div>
-          <div style={{ fontSize: '15px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
-            {activity.likes1h} <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {likesLimit}</span>
+          <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
+            {activity.likes1h} <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {likesLimit} 1h</span>
+          </div>
+          <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', marginTop: '2px' }}>
+            Today: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{activity.likesToday ?? activity.likes24h ?? 0}</span>
           </div>
         </div>
 
@@ -112,8 +115,11 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
             <MessageCircle size={12} color="#58a6ff" />
             Comments
           </div>
-          <div style={{ fontSize: '15px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
-            {activity.comments1h} <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {commentsLimit}</span>
+          <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
+            {activity.comments1h} <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {commentsLimit} 1h</span>
+          </div>
+          <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', marginTop: '2px' }}>
+            Today: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{activity.commentsToday ?? activity.comments24h ?? 0}</span>
           </div>
         </div>
 
@@ -122,8 +128,11 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
             <Send size={12} color="#3fb950" />
             Auto DMs
           </div>
-          <div style={{ fontSize: '15px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
-            {activity.dms1h} <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {dmsLimit}</span>
+          <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
+            {activity.dms1h} <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 400 }}>/ {dmsLimit} 1h</span>
+          </div>
+          <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', marginTop: '2px' }}>
+            Today: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{activity.dmsToday ?? activity.dms24h ?? 0}</span>
           </div>
         </div>
       </div>

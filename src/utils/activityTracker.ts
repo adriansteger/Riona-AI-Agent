@@ -51,8 +51,8 @@ export class ActivityTracker {
     }
 
     private cleanOldEntries() {
-        // Keep logs for 24 hours
-        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        // Keep logs for 7 days to allow daily tracking and account warming metrics
+        const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
         if (this.data[this.accountId]) {
             this.data[this.accountId].likes = (this.data[this.accountId].likes || []).filter(t => t > cutoff);
             this.data[this.accountId].comments = (this.data[this.accountId].comments || []).filter(t => t > cutoff);
@@ -109,6 +109,22 @@ export class ActivityTracker {
         const history = this.getHistory(action);
         const oneHourAgo = Date.now() - 60 * 60 * 1000;
         return history.filter(t => t > oneHourAgo).length;
+    }
+
+    public getCountSince(action: 'likes' | 'comments' | 'dms', sinceTimestamp: number): number {
+        this.data = this.loadData();
+        const history = this.getHistory(action);
+        return history.filter(t => t >= sinceTimestamp).length;
+    }
+
+    public getTodayCount(action: 'likes' | 'comments' | 'dms'): number {
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        return this.getCountSince(action, startOfDay.getTime());
+    }
+
+    public get24hCount(action: 'likes' | 'comments' | 'dms'): number {
+        return this.getCountSince(action, Date.now() - 24 * 60 * 60 * 1000);
     }
     public getTimeUntilAvailable(action: 'likes' | 'comments' | 'dms', limitPerHour: number): number {
         this.data = this.loadData();

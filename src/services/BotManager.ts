@@ -20,6 +20,12 @@ export interface AccountOverview {
         likes1h: number;
         comments1h: number;
         dms1h: number;
+        likesToday: number;
+        commentsToday: number;
+        dmsToday: number;
+        likes24h: number;
+        comments24h: number;
+        dms24h: number;
     };
     lastError?: string;
     lastRunAt?: number;
@@ -296,7 +302,13 @@ export class BotManager {
                 activity: {
                     likes1h: activityTracker.getRecentCount('likes'),
                     comments1h: activityTracker.getRecentCount('comments'),
-                    dms1h: activityTracker.getRecentCount('dms')
+                    dms1h: activityTracker.getRecentCount('dms'),
+                    likesToday: activityTracker.getTodayCount('likes'),
+                    commentsToday: activityTracker.getTodayCount('comments'),
+                    dmsToday: activityTracker.getTodayCount('dms'),
+                    likes24h: activityTracker.get24hCount('likes'),
+                    comments24h: activityTracker.get24hCount('comments'),
+                    dms24h: activityTracker.get24hCount('dms')
                 },
                 lastError: rt?.lastError,
                 lastRunAt: rt?.lastRunAt
