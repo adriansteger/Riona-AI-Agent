@@ -1945,7 +1945,10 @@ export class IgClient {
                         const foundEl = inputHandle.asElement();
                         if (foundEl) {
                             messageInputEl = foundEl as ElementHandle<Element>;
+                            await inputHandle.dispose().catch(() => {});
                             break;
+                        } else {
+                            await inputHandle.dispose().catch(() => {});
                         }
 
                         // Check if chat is restricted or read-only
@@ -1978,41 +1981,47 @@ export class IgClient {
                         return false;
                     }
 
-                    await messageInputEl.focus().catch(() => {});
-                    await messageInputEl.click().catch(() => {});
-                    await delay(300);
-
                     try {
-                        await messageInputEl.type(responseText, { delay: 20 });
-                    } catch {
-                        await page.keyboard.type(responseText, { delay: 20 });
+                        await messageInputEl.focus().catch(() => {});
+                        await messageInputEl.click().catch(() => {});
+                        await delay(300);
+
+                        try {
+                            await messageInputEl.type(responseText, { delay: 20 });
+                        } catch {
+                            await page.keyboard.type(responseText, { delay: 20 });
+                        }
+                        await delay(1000);
+
+                        const sendBtn = await page.evaluateHandle(() => {
+                            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                            return buttons.find(b => {
+                                const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                                return txt === 'send' || txt === 'senden' || txt === 'envoyer';
+                            }) || null;
+                        });
+
+                        const sendBtnEl = sendBtn.asElement();
+                        if (sendBtnEl) {
+                            await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
+                            this.logger.info("DM Sent.");
+                            activityTracker.trackAction('dms');
+                            this.dmsProcessedThisSession = true;
+                            await sendBtnEl.dispose().catch(() => {});
+                        } else {
+                            await page.keyboard.press('Enter');
+                            this.logger.info("DM Sent (via Enter key).");
+                            activityTracker.trackAction('dms');
+                            this.dmsProcessedThisSession = true;
+                        }
+                        await sendBtn.dispose().catch(() => {});
+
+                        this.logger.info("Waiting 10s before next DM to respect rate limits...");
+                        await delay(10000);
+                        return true;
+                    } finally {
+                        await messageInputEl.dispose().catch(() => {});
                     }
-                    await delay(1000);
-
-                    const sendBtn = await page.evaluateHandle(() => {
-                        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-                        return buttons.find(b => {
-                            const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
-                            return txt === 'send' || txt === 'senden' || txt === 'envoyer';
-                        }) || null;
-                    });
-
-                    const sendBtnEl = sendBtn.asElement();
-                    if (sendBtnEl) {
-                        await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
-                        this.logger.info("DM Sent.");
-                        activityTracker.trackAction('dms');
-                        this.dmsProcessedThisSession = true;
-                    } else {
-                        await page.keyboard.press('Enter');
-                        this.logger.info("DM Sent (via Enter key).");
-                        activityTracker.trackAction('dms');
-                        this.dmsProcessedThisSession = true;
-                    }
-
-                    this.logger.info("Waiting 10s before next DM to respect rate limits...");
-                    await delay(10000);
-                    return true;
                 }
             }
         } catch (e) {
@@ -2228,7 +2237,7 @@ export class IgClient {
 
     private async isPostLikedInDB(urlOrPath: string): Promise<boolean> {
         const normPath = this.normalizePostPath(urlOrPath);
-        if (!normPath) return false;
+        if (!normPath || normPath === '/' || (!normPath.startsWith('/p/') && !normPath.startsWith('/reel/'))) return false;
         const fullUrl = `https://www.instagram.com${normPath}`;
         try {
             return !!(await LikedPost.exists({
@@ -2246,7 +2255,7 @@ export class IgClient {
 
     private async recordPostLikedInDB(urlOrPath: string): Promise<void> {
         const normPath = this.normalizePostPath(urlOrPath);
-        if (!normPath) return;
+        if (!normPath || normPath === '/' || (!normPath.startsWith('/p/') && !normPath.startsWith('/reel/'))) return;
         try {
             await LikedPost.updateOne(
                 { username: this.username, postUrl: normPath },
@@ -2467,14 +2476,17 @@ this.logger.info("Waiting for page hydration...");
                                             await this.recordPostLikedInDB(modalUrl);
                                         } else {
                                             this.logger.warn(`Strict like selector (${likeSelector}) failed. Trying fallback...`);
-                                            const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
+                                             const potentialButtons = await this.page.$$('svg[aria-label="Like"]');
                                             for (const btn of potentialButtons) {
-                                                const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]'));
-                                                if (!isComment) {
-                                                    likeButton = btn as ElementHandle;
-                                                    this.logger.info("Found fallback like button!");
-                                                    break;
+                                                if (!likeButton) {
+                                                    const isComment = await btn.evaluate(el => !!el.closest('ul') || !!el.closest('div[role="button"]'));
+                                                    if (!isComment) {
+                                                        likeButton = btn as ElementHandle;
+                                                        this.logger.info("Found fallback like button!");
+                                                        continue;
+                                                    }
                                                 }
+                                                await btn.dispose().catch(() => {});
                                             }
 
                                             if (!likeButton) {
@@ -2484,18 +2496,22 @@ this.logger.info("Waiting for page hydration...");
                                     }
 
                                     if (likeButton) {
-                                        const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
-                                        if (isConnected) {
-                                            this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
-                                            await this.humanLikeClick(likeButton);
-                                            await delay(getHumanLikeDelay(1500, 800));
+                                        try {
+                                            const isConnected = await likeButton.evaluate(el => el.isConnected).catch(() => false);
+                                            if (isConnected) {
+                                                this.logger.info(`Liking post ${postsChecked + 1} in #${tag}...`);
+                                                await this.humanLikeClick(likeButton);
+                                                await delay(getHumanLikeDelay(1500, 800));
 
-                                            await this.checkActionBlock("Hashtag Like Action");
+                                                await this.checkActionBlock("Hashtag Like Action");
 
-                                            activityTracker.trackAction('likes');
-                                            interactionPerformed = true;
+                                                activityTracker.trackAction('likes');
+                                                interactionPerformed = true;
 
-                                            await this.recordPostLikedInDB(modalUrl);
+                                                await this.recordPostLikedInDB(modalUrl);
+                                            }
+                                        } finally {
+                                            await likeButton.dispose().catch(() => {});
                                         }
                                     }
                                 }
@@ -2511,17 +2527,21 @@ this.logger.info("Waiting for page hydration...");
                                 let likedCount = 0;
 
                                 for (const btn of allLikeButtons) {
-                                    if (likedCount >= 1) break;
-
-                                    const isMainLike = await btn.evaluate(el => !!el.closest('section'));
-                                    if (isMainLike) continue;
-
-                                    const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
-                                    if (isConnected) {
-                                        this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
-                                        await this.humanLikeClick(btn);
-                                        await delay(getHumanLikeDelay(1500, 800));
-                                        likedCount++;
+                                    try {
+                                        if (likedCount < 1) {
+                                            const isMainLike = await btn.evaluate(el => !!el.closest('section'));
+                                            if (!isMainLike) {
+                                                const isConnected = await btn.evaluate(el => el.isConnected).catch(() => false);
+                                                if (isConnected) {
+                                                    this.logger.info(`Liking a comment on post ${postsChecked + 1}...`);
+                                                    await this.humanLikeClick(btn);
+                                                    await delay(getHumanLikeDelay(1500, 800));
+                                                    likedCount++;
+                                                }
+                                            }
+                                        }
+                                    } finally {
+                                        await btn.dispose().catch(() => {});
                                     }
                                 }
                             } catch (e) {
@@ -2531,6 +2551,7 @@ this.logger.info("Waiting for page hydration...");
                     } else {
                         if (behavior.enableLikes !== false) {
                             this.logger.info("Hourly like limit reached. Stopping hashtag session.");
+                            await postElement.dispose().catch(() => {});
                             return actionsDone;
                         }
                     }
@@ -2578,14 +2599,18 @@ this.logger.info("Waiting for page hydration...");
                             await this.humanLikeClick(closeBtnHandle as any).catch(() => {});
                             await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
                             await delay(1000);
+                            await closeBtnHandle.dispose().catch(() => {});
                         } else {
                             this.logger.warn("Close button not found. Using 'Escape' key.");
                             await this.page.keyboard.press('Escape');
                             await this.page.waitForSelector('div[role="dialog"]', { hidden: true, timeout: 5000 }).catch(() => {});
                             await delay(1000);
                         }
+                        await closeButton.dispose().catch(() => {});
                     } catch (e) {
                         this.logger.warn("Error closing modal: " + e);
+                    } finally {
+                        await postElement.dispose().catch(() => {});
                     }
 
                     if (interactionPerformed) {
@@ -2940,7 +2965,12 @@ this.logger.info("Waiting for page hydration...");
                 );
                 await delay(waitTime);
                 // Extra wait to ensure all actions are complete before scrolling
-                await delay(1000);
+                // Dispose handles to free renderer DOM references
+                if (likeButton) await likeButton.dispose().catch(() => {});
+                if (postLink) await postLink.dispose().catch(() => {});
+                if (captionElement) await captionElement.dispose().catch(() => {});
+                if (moreLink) await moreLink.dispose().catch(() => {});
+
                 // Scroll to the next post
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight);
@@ -3051,10 +3081,15 @@ this.logger.info("Waiting for page hydration...");
                     this.browser.close(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error("Browser close timeout")), 15000))
                 ]).catch(async (closeErr) => {
-                    this.logger.warn(`Browser close timed out or failed: ${closeErr.message || closeErr}. Force killing process...`);
-                    if (proc) {
+                    this.logger.warn(`Browser close timed out or failed: ${closeErr.message || closeErr}. Force killing process tree...`);
+                    if (proc && proc.pid) {
                         try {
-                            proc.kill('SIGKILL');
+                            if (process.platform === 'win32') {
+                                const { execSync } = require('child_process');
+                                execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+                            } else {
+                                proc.kill('SIGKILL');
+                            }
                         } catch (killErr) {
                             this.logger.error(`Failed to force kill process: ${killErr}`);
                         }
@@ -3067,6 +3102,21 @@ this.logger.info("Waiting for page hydration...");
                         }
                     }
                 });
+
+                // On Windows, ensure any lingering detached children are cleaned up
+                if (proc && proc.pid && process.platform === 'win32') {
+                    try {
+                        const { execSync } = require('child_process');
+                        execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: 'ignore' });
+                    } catch {
+                        // Already terminated cleanly
+                    }
+                }
+                if (this.userDataDir) {
+                    try {
+                        await killChromeProcessByProfile(this.userDataDir);
+                    } catch {}
+                }
             } catch (e) {
                 this.logger.warn(`Error closing browser: ${e}`);
             }

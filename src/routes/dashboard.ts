@@ -284,21 +284,46 @@ router.get('/logs/:id/stream', (req: Request, res: Response) => {
 
     // 2. Subscribe to incoming logs
     const eventName = accountId === 'all' ? 'log:*' : `log:${accountId}`;
+    let cleanedUp = false;
+
+    const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        clearInterval(keepalive);
+        logBus.off(eventName, onLog);
+    };
+
     const onLog = (entry: LogEntry) => {
-        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+        try {
+            if (!res.writableEnded && !res.destroyed) {
+                res.write(`data: ${JSON.stringify(entry)}\n\n`);
+            } else {
+                cleanup();
+            }
+        } catch {
+            cleanup();
+        }
     };
 
     logBus.on(eventName, onLog);
 
     // Keepalive heartbeat every 15s
     const keepalive = setInterval(() => {
-        res.write(': keepalive\n\n');
+        try {
+            if (!res.writableEnded && !res.destroyed) {
+                res.write(': keepalive\n\n');
+            } else {
+                cleanup();
+            }
+        } catch {
+            cleanup();
+        }
     }, 15000);
 
-    req.on('close', () => {
-        clearInterval(keepalive);
-        logBus.off(eventName, onLog);
-    });
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
+    req.on('close', cleanup);
+    req.on('aborted', cleanup);
 });
 
 // ================= JOB BOT =================

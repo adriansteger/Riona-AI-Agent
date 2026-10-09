@@ -66,7 +66,7 @@ export const Login: React.FC = () => {
             <Lock size={20} />
           </div>
           <h1 style={{ fontSize: '18px', fontWeight: 700, letterSpacing: '0.02em' }}>
-            RIONA CONTROL ROOM
+            INSTAGRAM AI AGENT CONTROL ROOM
           </h1>
           <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
             Enter dashboard administrator password

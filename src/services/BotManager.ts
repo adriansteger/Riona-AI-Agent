@@ -206,6 +206,16 @@ export class BotManager {
             this.activeSessions.delete(accountId);
         }
 
+        // Wait for loop promise to cleanly terminate if still active
+        if (rt.loopPromise) {
+            try {
+                await Promise.race([
+                    rt.loopPromise,
+                    new Promise((resolve) => setTimeout(resolve, 5000))
+                ]);
+            } catch {}
+        }
+
         return { success: true, message: `Stop signal sent for ${accountId}` };
     }
 
@@ -376,6 +386,15 @@ export class BotManager {
                 logger.warn(`[BotManager] Error closing Job Bot client: ${err}`);
             }
             this.globalJobClient = null;
+        }
+
+        if (this.jobBotPromise) {
+            try {
+                await Promise.race([
+                    this.jobBotPromise,
+                    new Promise((resolve) => setTimeout(resolve, 5000))
+                ]);
+            } catch {}
         }
 
         return { success: true, message: 'Job Bot stopped.' };
