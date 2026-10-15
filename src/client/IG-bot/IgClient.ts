@@ -409,10 +409,24 @@ export class IgClient {
         while (attempt < maxAttempts) {
             try {
                 // Wrap browser launch in a 90-second timeout to prevent infinite hangs
-                this.browser = await Promise.race([
-                    puppeteerExtra.launch(launchOptions),
-                    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Browser launch timeout")), 90000))
-                ]);
+                let launchTimedOut = false;
+                let launchTimer: NodeJS.Timeout | undefined;
+                const launchPromise = puppeteerExtra.launch(launchOptions);
+                // If the launch completes after we gave up, close it instead of leaving an orphaned Chrome
+                launchPromise.then(b => { if (launchTimedOut) b.close().catch(() => {}); }).catch(() => {});
+                try {
+                    this.browser = await Promise.race([
+                        launchPromise,
+                        new Promise<never>((_, reject) => {
+                            launchTimer = setTimeout(() => {
+                                launchTimedOut = true;
+                                reject(new Error("Browser launch timeout"));
+                            }, 90000);
+                        })
+                    ]);
+                } finally {
+                    clearTimeout(launchTimer);
+                }
                 
                 // CRITICAL: Give the browser and stealth plugin a moment to stabilize
                 await delay(2000);

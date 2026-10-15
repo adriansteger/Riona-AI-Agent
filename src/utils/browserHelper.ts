@@ -17,17 +17,23 @@ export const killChromeProcessByProfile = async (userDataDir: string): Promise<v
         let command = '';
 
         if (platform === 'win32') {
-            // WMIC command for Windows
-            // wmic process where "name='chrome.exe' and commandline like '%<folder>%'" delete
-            // wmic process where "name='chrome.exe' and commandline like '%user-data-dir=%<folder>%'" delete
-            // We use the full absolute path to be safe, but escape backslashes for WQL
-            const escapedPath = absolutePath.replace(/\\/g, '\\\\');
-            // Use PowerShell with -NoProfile and -ExecutionPolicy Bypass so execution policies do not block command
-            command = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \\"Name = 'chrome.exe' AND (CommandLine LIKE '%user-data-dir=${escapedPath}%' OR CommandLine LIKE '%${profileFolder}%')\\" | Invoke-CimMethod -MethodName Terminate"`;
+            // Match the exact --user-data-dir path (optionally quoted) followed by a boundary.
+            // A plain substring/LIKE match would also hit sibling profiles sharing a prefix
+            // (e.g. "ascotech" matching "ascotech_shop") and kill other accounts' browsers.
+            const pathRegex = absolutePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const psRegex = `--user-data-dir="?${pathRegex}"?(\\s|$)`.replace(/'/g, "''");
+            const script =
+                `Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" | ` +
+                `Where-Object { $_.CommandLine -match '${psRegex}' } | ` +
+                `ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null; 'Instance deletion successful' }`;
+            // -EncodedCommand avoids nested cmd/PowerShell quoting issues
+            const encoded = Buffer.from(script, 'utf16le').toString('base64');
+            command = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
         } else if (platform === 'linux') {
-            // pkill for Linux (Raspbian) - matches against full command line with -f
-            // We look for any process with the profile folder in its arguments
-            command = `pkill -f "${profileFolder}"`;
+            // pkill for Linux (Raspbian) - matches against full command line with -f.
+            // Anchor on the exact user-data-dir path so sibling profiles are not matched.
+            const pathRegex = absolutePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            command = `pkill -f -- '--user-data-dir=${pathRegex}( |$)'`;
         } else {
             // macOS (darwin) or other: not fully implemented yet, just resolve
             return resolve();
