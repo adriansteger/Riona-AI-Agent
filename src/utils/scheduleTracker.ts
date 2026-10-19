@@ -5,6 +5,7 @@ interface ScheduleLog {
     [accountId: string]: {
         nextActiveTime: number; // Timestamp of when the bot can become active again
         lastDMCheckTime?: number; // Timestamp of when the last DM check occurred
+        consecutiveEmptySessions?: number; // Sessions in a row that ended with 0 actions (drives retry backoff)
     }
 }
 
@@ -93,6 +94,31 @@ export class ScheduleTracker {
         }
         this.data[this.accountId].lastDMCheckTime = timestamp;
         this.saveData();
+    }
+
+    /**
+       * Records the outcome of an active session and returns the number of
+       * consecutive sessions (including this one) that ended with 0 actions.
+       */
+    public recordSessionResult(actionsCompleted: number): number {
+        this.data = this.loadData();
+        if (!this.data[this.accountId]) {
+            this.data[this.accountId] = { nextActiveTime: 0 };
+        }
+        const count = actionsCompleted > 0 ? 0 : (this.data[this.accountId].consecutiveEmptySessions || 0) + 1;
+        this.data[this.accountId].consecutiveEmptySessions = count;
+        this.saveData();
+        return count;
+    }
+
+    /**
+       * Timestamp of the next wake-up (sleepEndHour) after now.
+       */
+    public static getNextWakeTime(sleepEndHour: number): number {
+        const wake = new Date();
+        wake.setHours(sleepEndHour, 0, 0, 0);
+        if (wake.getTime() <= Date.now()) wake.setDate(wake.getDate() + 1);
+        return wake.getTime();
     }
 
     /**

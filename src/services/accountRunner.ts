@@ -119,6 +119,18 @@ export const processAccount = async (
 
         const activityTracker = new ActivityTracker(trackerId);
 
+        // --- DAILY LIKE CAP ---
+        const likesPerDay = Number(limits.likesPerDay) || 110;
+        if (!isDMOnlyRun && behavior.enableLikes !== false && !behavior.enableComments) {
+            const likesToday = activityTracker.getTodayCount('likes');
+            if (likesToday >= likesPerDay) {
+                const wakeTime = ScheduleTracker.getNextWakeTime(scheduleSettings.sleepEndHour ?? 7);
+                scheduleTracker.setNextActiveTime(wakeTime);
+                accountLogger.info(`Daily like cap reached (${likesToday}/${likesPerDay}). Resting until ${new Date(wakeTime).toLocaleString()}.`);
+                return;
+            }
+        }
+
         // --- LIKES PER SESSION RANDOMIZATION ---
         let sessionLikesTarget = 10;
         if (limits.likesPerSession) {
@@ -129,7 +141,7 @@ export const processAccount = async (
                 sessionLikesTarget = Number(limits.likesPerSession);
             }
         }
-        const sessionLimits = { ...limits, likesPerSession: sessionLikesTarget };
+        const sessionLimits = { ...limits, likesPerSession: sessionLikesTarget, likesPerDay };
         accountLogger.info(`Session interaction target: ${sessionLikesTarget} actions.`);
 
         const msToNextLike = (behavior.enableLikes !== false) ? activityTracker.getTimeUntilAvailable('likes', limits.likesPerHour) : 0;
@@ -272,9 +284,12 @@ export const processAccount = async (
                     } else {
                         // Update the Rest Cycle
                         let restDelayMs;
+                        const emptySessions = scheduleTracker.recordSessionResult(actionsCompleted);
                         if (actionsCompleted === 0) {
-                            accountLogger.warn("Performed 0 interactions in this session. Scheduling a short retry delay of 5 minutes instead of a full rest cycle.");
-                            restDelayMs = 5 * 60 * 1000;
+                            // Escalate retries so a broken page doesn't cause constant reloads all day
+                            const retryMinutes = [5, 15, 30, 60][Math.min(emptySessions, 4) - 1];
+                            accountLogger.warn(`Performed 0 interactions in this session (${emptySessions} in a row). Scheduling a retry in ${retryMinutes} minutes instead of a full rest cycle.`);
+                            restDelayMs = retryMinutes * 60 * 1000;
                         } else {
                             restDelayMs = ScheduleTracker.getRandomDelayMs(scheduleSettings.minRestMinutes, scheduleSettings.maxRestMinutes);
                         }

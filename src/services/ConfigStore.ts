@@ -16,6 +16,7 @@ export interface AccountSettings {
     limits?: {
         likesPerHour?: number;
         likesPerSession?: string | number;
+        likesPerDay?: number;
         commentsPerHour?: number;
         dmsPerHour?: number;
     };
@@ -162,14 +163,15 @@ export class ConfigStore {
                         enableAutoDMs: false
                     },
                     limits: {
-                        likesPerHour: 10,
-                        likesPerSession: '3-6'
+                        likesPerHour: 15,
+                        likesPerSession: '8-12',
+                        likesPerDay: 110
                     },
                     schedule: {
                         sleepStartHour: 23,
                         sleepEndHour: 7,
-                        minRestMinutes: 60,
-                        maxRestMinutes: 120,
+                        minRestMinutes: 40,
+                        maxRestMinutes: 80,
                         dmCheckIntervalMinutes: 15
                     }
                 },

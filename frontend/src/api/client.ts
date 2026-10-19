@@ -20,6 +20,7 @@ export interface SanitizedAccount {
     limits?: {
       likesPerHour?: number;
       likesPerSession?: string | number;
+      likesPerDay?: number;
       commentsPerHour?: number;
       dmsPerHour?: number;
     };

@@ -2281,9 +2281,18 @@ export class IgClient {
         }
     }
 
+    private async hasPostGrid(): Promise<boolean> {
+        if (!this.page) return false;
+        const title = (await this.page.title().catch(() => "")).toLowerCase();
+        if (title.includes("couldn't load") || title.includes("isn't available") || title.includes("not found")) return false;
+        await this.page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
+        await delay(2000);
+        return this.page.evaluate(() => document.querySelectorAll('a[href^="/p/"], a[href^="/reel/"]').length > 0).catch(() => false);
+    }
+
     async interactWithHashtags(hashtags: string[], options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; enableCommentLikes?: boolean; };
-        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
+        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; likesPerDay?: number; }
     } = {}): Promise<number> {
         if (!this.page) throw new Error("Page not initialized");
         const { behavior = { enableLikes: true, enableComments: true, enableCommentLikes: true }, limits } = options;
@@ -2299,6 +2308,8 @@ export class IgClient {
         // Initialize Activity Tracker
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
+        const maxLikesPerDay = limits?.likesPerDay;
+        const dailyCapReached = () => !!maxLikesPerDay && activityTracker.getTodayCount('likes') >= maxLikesPerDay;
 
         this.logger.info(`Starting Hashtag Interaction session. Tags: [${hashtags.join(', ')}]`);
 
@@ -2322,11 +2333,18 @@ export class IgClient {
             try {
                 await this.ensurePageActive();
                 this.logger.info(`Navigating to hashtag page: #${tag}`);
-                await this.gotoWithRetry(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: "domcontentloaded" });
+                await this.gotoWithRetry(`https://www.instagram.com/explore/tags/${encodeURIComponent(tag)}/`, { waitUntil: "domcontentloaded" });
 
                 // Allow hydration time (essential for React)
-this.logger.info("Waiting for page hydration...");
+                this.logger.info("Waiting for page hydration...");
                 await delay(5000);
+
+                // Instagram has been failing /explore/tags/ pages ("Page couldn't load"); fall back to keyword search
+                if (!(await this.hasPostGrid())) {
+                    this.logger.warn(`Hashtag page for #${tag} did not load a post grid (title: "${await this.page.title()}"). Trying keyword search fallback...`);
+                    await this.gotoWithRetry(`https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent('#' + tag)}`, { waitUntil: "domcontentloaded" });
+                    await delay(getHumanLikeDelay(5000, 1500));
+                }
 
                 // Scroll down to trigger lazy-loaded grid
                 await this.page.evaluate(() => window.scrollBy(0, 300));
@@ -2349,7 +2367,7 @@ this.logger.info("Waiting for page hydration...");
                     let postLinks = [];
                     try {
                         postLinks = await this.page.evaluate(() => {
-                            const links = Array.from(document.querySelectorAll('main a[href^="/p/"], a[href^="/p/"]'));
+                            const links = Array.from(document.querySelectorAll('a[href^="/p/"], a[href^="/reel/"]'));
                             return links.map(a => ({
                                 href: a.getAttribute('href'),
                             })).filter(l => l.href);
@@ -2458,7 +2476,7 @@ this.logger.info("Waiting for page hydration...");
                     }
 
                     // --- LIKING LOGIC (Modal) ---
-                    const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
+                    const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour) && !dailyCapReached();
                     if (canLike) {
                         try {
                             // Dwell time: simulate viewing the image/video, reading caption
@@ -2564,7 +2582,7 @@ this.logger.info("Waiting for page hydration...");
                         }
                     } else {
                         if (behavior.enableLikes !== false) {
-                            this.logger.info("Hourly like limit reached. Stopping hashtag session.");
+                            this.logger.info("Hourly/daily like limit reached. Stopping hashtag session.");
                             await postElement.dispose().catch(() => {});
                             return actionsDone;
                         }
@@ -2700,7 +2718,7 @@ this.logger.info("Waiting for page hydration...");
 
     async interactWithPosts(options: {
         behavior?: { enableLikes?: boolean; enableComments?: boolean; },
-        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; }
+        limits?: { likesPerHour?: number; commentsPerHour?: number; likesPerSession?: number; likesPerDay?: number; }
     } = {}): Promise<number> {
         await this.ensurePageActive();
         if (!this.page) throw new Error("Page not initialized");
@@ -2710,10 +2728,12 @@ this.logger.info("Waiting for page hydration...");
         const maxLikesPerHour = limits?.likesPerHour || 10;
         const maxCommentsPerHour = limits?.commentsPerHour || 5;
         const targetActions = limits?.likesPerSession || 10;
+        const maxLikesPerDay = limits?.likesPerDay;
 
         // Initialize Activity Tracker
         const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
         const activityTracker = new ActivityTracker(accountId);
+        const dailyCapReached = () => !!maxLikesPerDay && activityTracker.getTodayCount('likes') >= maxLikesPerDay;
 
         this.logger.info(`Starting interaction session. Hourly Limits: Likes=${maxLikesPerHour}, Comments=${maxCommentsPerHour}. Session Target=${targetActions}.`);
 
@@ -2724,6 +2744,14 @@ this.logger.info("Waiting for page hydration...");
             this.logger.warn("Cannot interact with posts: Account is on a security challenge/checkpoint page. Triggering handleRecaptcha...");
             await this.handleRecaptcha();
             return 0;
+        }
+
+        // Make sure we are on the home feed (we may still be on a hashtag page or the DM inbox)
+        const currentPath = new URL(page.url() || "about:blank", "https://www.instagram.com").pathname;
+        if (!page.url().includes("instagram.com") || currentPath !== "/") {
+            this.logger.info(`Navigating to home feed (current page: ${page.url()})`);
+            await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+            await delay(getHumanLikeDelay(4000, 1500));
         }
 
         // Wait for the feed to load
@@ -2773,6 +2801,8 @@ this.logger.info("Waiting for page hydration...");
         let postIndex = 1; // Start with the first post
         let actionsDone = 0;
         const maxPosts = Math.max(targetActions * 8, 60); // Scaled to reach target with ~20% like rate
+        let consecutiveEmptyScrolls = 0;
+        const seenPostUrls = new Set<string>();
 
         while (postIndex <= maxPosts && actionsDone < targetActions) {
             // Check for exit flag
@@ -2782,23 +2812,37 @@ this.logger.info("Waiting for page hydration...");
             }
 
             // CHECK SAFETY LIMITS (Global check with feature toggles)
-            const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour);
+            const canLike = behavior.enableLikes !== false && activityTracker.canPerformAction('likes', maxLikesPerHour) && !dailyCapReached();
             const canComment = behavior.enableComments !== false && activityTracker.canPerformAction('comments', maxCommentsPerHour);
 
             if (!canLike && !canComment) {
-                this.logger.warn("Hourly limits reached or features disabled for BOTH actions. Ending session early.");
+                this.logger.warn("Hourly/daily limits reached or features disabled for BOTH actions. Ending session early.");
                 break;
             }
 
+            let post: puppeteer.ElementHandle<Element> | null = null;
             try {
-                const postSelector = `article:nth-of-type(${postIndex})`;
-                // Check if the post exists
-                if (!(await page.$(postSelector))) {
-                    console.log("No more posts found. Ending iteration...");
-                    return actionsDone;
+                // Feed is lazy-loaded/virtualized, so nth-of-type breaks after a few posts.
+                // Mark processed articles in the DOM and always take the next unmarked one.
+                post = await page.$('article:not([data-igbot-seen])');
+                if (!post) {
+                    consecutiveEmptyScrolls++;
+                    if (consecutiveEmptyScrolls >= 4) {
+                        console.log("No more posts found after scrolling. Ending iteration...");
+                        return actionsDone;
+                    }
+                    await page.evaluate(() => { window.scrollBy(0, window.innerHeight); });
+                    await delay(getHumanLikeDelay(2500, 1000));
+                    continue;
                 }
-                const likeButtonSelector = `${postSelector} svg[aria-label="Like"]`;
-                const likeButton = await page.$(likeButtonSelector);
+                consecutiveEmptyScrolls = 0;
+                await post.evaluate(el => {
+                    el.setAttribute('data-igbot-seen', '1');
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                });
+                await delay(getHumanLikeDelay(1200, 500));
+
+                const likeButton = await post.$('svg[aria-label="Like"], svg[aria-label="Unlike"]');
                 let ariaLabel = null;
                 if (likeButton) {
                     ariaLabel = await likeButton.evaluate((el: Element) => el.getAttribute("aria-label"));
@@ -2807,8 +2851,7 @@ this.logger.info("Waiting for page hydration...");
                 // Extract Post URL to check DB
                 // In main feed, it's harder to get the exact post URL without clicking it.
                 // We'll try to find the timestamp link which contains the post URI.
-                const postLinkSelector = `${postSelector} a[href*="/p/"]`;
-                const postLink = await page.$(postLinkSelector);
+                const postLink = await post.$('a[href*="/p/"], a[href*="/reel/"]');
                 let postUrl = "";
                 if (postLink) {
                     try {
@@ -2823,11 +2866,19 @@ this.logger.info("Waiting for page hydration...");
                     }
                 }
 
+                // Re-rendered articles lose the DOM marker; skip them by URL
+                if (postUrl && seenPostUrls.has(postUrl)) {
+                    if (likeButton) await likeButton.dispose().catch(() => {});
+                    if (postLink) await postLink.dispose().catch(() => {});
+                    continue;
+                }
+                if (postUrl) seenPostUrls.add(postUrl);
+
                 const isAlreadyLikedDB = postUrl ? await this.isPostLikedInDB(postUrl) : false;
 
                 if (isAlreadyLikedDB || ariaLabel === "Unlike") {
                     this.logger.info(`Skipping post ${postIndex}: already liked (${isAlreadyLikedDB ? 'DB' : 'UI'}).`);
-                    
+
                     // Update DB if found in UI but not in DB
                     if (!isAlreadyLikedDB && postUrl) {
                         await this.recordPostLikedInDB(postUrl);
@@ -2835,15 +2886,16 @@ this.logger.info("Waiting for page hydration...");
 
                     // Move to next post immediately
                     postIndex++;
-                    await page.evaluate(() => { window.scrollBy(0, window.innerHeight); });
+                    if (likeButton) await likeButton.dispose().catch(() => {});
+                    if (postLink) await postLink.dispose().catch(() => {});
                     await delay(getHumanLikeDelay(2000, 1000));
                     continue;
                 }
 
                 // --- LIKING LOGIC ---
                 if (behavior.enableLikes !== false) {
-                    if (!activityTracker.canPerformAction('likes', maxLikesPerHour)) {
-                        console.log(`Skipping like: Hourly limit reached (${activityTracker.getRecentCount('likes')}/${maxLikesPerHour}).`);
+                    if (!activityTracker.canPerformAction('likes', maxLikesPerHour) || dailyCapReached()) {
+                        console.log(`Skipping like: Hourly/daily limit reached (hour ${activityTracker.getRecentCount('likes')}/${maxLikesPerHour}, today ${activityTracker.getTodayCount('likes')}/${maxLikesPerDay ?? '∞'}).`);
                     } else if (ariaLabel === "Like" && likeButton) {
                         // Human dwell time: simulate reading/viewing the feed post
                         await delay(getHumanLikeDelay(3500, 1500));
@@ -2889,8 +2941,7 @@ this.logger.info("Waiting for page hydration...");
                 }
 
                 // Extract and log the post caption
-                const captionSelector = `${postSelector} div.x9f619 span._ap3a div span._ap3a`;
-                const captionElement = await page.$(captionSelector);
+                const captionElement = await post.$('div.x9f619 span._ap3a div span._ap3a');
                 let caption = "";
                 if (captionElement) {
                     caption = await captionElement.evaluate((el) => (el as HTMLElement).innerText);
@@ -2899,9 +2950,8 @@ this.logger.info("Waiting for page hydration...");
                     console.log(`No caption found for post ${postIndex}.`);
                 }
                 // Check if there is a '...more' link to expand the caption
-                const moreLinkSelector = `${postSelector} div.x9f619 span._ap3a span div span.x1lliihq`;
                 // Use safe evaluation to check connectivity
-                const moreLink = await page.$(moreLinkSelector);
+                const moreLink = await post.$('div.x9f619 span._ap3a span div span.x1lliihq');
 
                 if (moreLink && captionElement) {
                     try {
@@ -2926,8 +2976,7 @@ this.logger.info("Waiting for page hydration...");
                     if (!activityTracker.canPerformAction('comments', maxCommentsPerHour)) {
                         console.log(`Skipping comment: Hourly limit reached (${activityTracker.getRecentCount('comments')}/${maxCommentsPerHour}).`);
                     } else {
-                        const commentBoxSelector = `${postSelector} textarea`;
-                        const commentBox = await page.$(commentBoxSelector);
+                        const commentBox = await post.$('textarea');
                         if (commentBox) {
                             console.log(`Commenting on post ${postIndex}...`);
                             const prompt = `human-like Instagram comment based on to the following post: "${caption}". make sure the reply\n            Matchs the tone of the caption (casual, funny, serious, or sarcastic).\n            Sound organic—avoid robotic phrasing, overly perfect grammar, or anything that feels AI-generated.\n            Use relatable language, including light slang, emojis (if appropriate), and subtle imperfections like minor typos or abbreviations (e.g., 'lol' or 'omg').\n            If the caption is humorous or sarcastic, play along without overexplaining the joke.\n            If the post is serious (e.g., personal struggles, activism), respond with empathy and depth.\n            Avoid generic praise ('Great post!'); instead, react specifically to the content (e.g., 'The way you called out pineapple pizza haters 😂👏').\n            *Keep it concise (1-2 sentences max) and compliant with Instagram's guidelines (no spam, harassment, etc.).*`;
@@ -2985,10 +3034,7 @@ this.logger.info("Waiting for page hydration...");
                 if (captionElement) await captionElement.dispose().catch(() => {});
                 if (moreLink) await moreLink.dispose().catch(() => {});
 
-                // Scroll to the next post
-                await page.evaluate(() => {
-                    window.scrollBy(0, window.innerHeight);
-                });
+                // Next iteration scrolls the next unseen article into view
                 postIndex++;
             } catch (error: any) {
                 if (error.message.includes('Target closed') || error.message.includes('Session closed')) {
@@ -3000,6 +3046,8 @@ this.logger.info("Waiting for page hydration...");
                     this.emailService.sendErrorAlert(this.username, error.message || "Unknown", "Feed Interaction Loop").catch(() => { });
                 }
                 break;
+            } finally {
+                if (post) await post.dispose().catch(() => {});
             }
         }
         return actionsDone;

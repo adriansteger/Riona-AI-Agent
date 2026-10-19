@@ -32,16 +32,17 @@ export const AccountEdit: React.FC = () => {
   const [enableAutoDMs, setEnableAutoDMs] = useState(false);
 
   // Limits
-  const [likesPerHour, setLikesPerHour] = useState(12);
-  const [likesPerSession, setLikesPerSession] = useState('3-6');
+  const [likesPerHour, setLikesPerHour] = useState(15);
+  const [likesPerSession, setLikesPerSession] = useState('8-12');
+  const [likesPerDay, setLikesPerDay] = useState(110);
   const [commentsPerHour, setCommentsPerHour] = useState(5);
   const [dmsPerHour, setDmsPerHour] = useState(8);
 
   // Schedule
   const [sleepStartHour, setSleepStartHour] = useState(23);
   const [sleepEndHour, setSleepEndHour] = useState(7);
-  const [minRestMinutes, setMinRestMinutes] = useState(60);
-  const [maxRestMinutes, setMaxRestMinutes] = useState(150);
+  const [minRestMinutes, setMinRestMinutes] = useState(40);
+  const [maxRestMinutes, setMaxRestMinutes] = useState(80);
   const [dmCheckIntervalMinutes, setDmCheckIntervalMinutes] = useState(15);
 
   // Hashtags
@@ -75,8 +76,9 @@ export const AccountEdit: React.FC = () => {
 
           // Limits
           if (acc.settings?.limits) {
-            setLikesPerHour(acc.settings.limits.likesPerHour ?? 12);
-            setLikesPerSession(String(acc.settings.limits.likesPerSession ?? '3-6'));
+            setLikesPerHour(acc.settings.limits.likesPerHour ?? 15);
+            setLikesPerSession(String(acc.settings.limits.likesPerSession ?? '8-12'));
+            setLikesPerDay(acc.settings.limits.likesPerDay ?? 110);
             setCommentsPerHour(acc.settings.limits.commentsPerHour ?? 5);
             setDmsPerHour(acc.settings.limits.dmsPerHour ?? 8);
           }
@@ -85,8 +87,8 @@ export const AccountEdit: React.FC = () => {
           if (acc.settings?.schedule) {
             setSleepStartHour(acc.settings.schedule.sleepStartHour ?? 23);
             setSleepEndHour(acc.settings.schedule.sleepEndHour ?? 7);
-            setMinRestMinutes(acc.settings.schedule.minRestMinutes ?? 60);
-            setMaxRestMinutes(acc.settings.schedule.maxRestMinutes ?? 150);
+            setMinRestMinutes(acc.settings.schedule.minRestMinutes ?? 40);
+            setMaxRestMinutes(acc.settings.schedule.maxRestMinutes ?? 80);
             setDmCheckIntervalMinutes(acc.settings.schedule.dmCheckIntervalMinutes ?? 15);
           }
 
@@ -136,6 +138,7 @@ export const AccountEdit: React.FC = () => {
         limits: {
           likesPerHour: Number(likesPerHour),
           likesPerSession,
+          likesPerDay: Number(likesPerDay),
           commentsPerHour: Number(commentsPerHour),
           dmsPerHour: Number(dmsPerHour),
         },
@@ -477,7 +480,21 @@ export const AccountEdit: React.FC = () => {
                   type="text"
                   value={likesPerSession}
                   onChange={(e) => setLikesPerSession(e.target.value)}
-                  placeholder="3-6"
+                  placeholder="8-12"
+                  style={{ width: '100%', fontFamily: 'var(--font-mono)' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  Likes / Day (Cap)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="500"
+                  value={likesPerDay}
+                  onChange={(e) => setLikesPerDay(Number(e.target.value))}
                   style={{ width: '100%', fontFamily: 'var(--font-mono)' }}
                 />
               </div>
