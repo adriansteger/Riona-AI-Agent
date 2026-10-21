@@ -9,7 +9,8 @@
     "train:audio": "tsc && node build/Agent/training/TrainWithAudio.js",
     "train:youtube": "tsc && node build/Agent/training/youtubeURL.js",
     "dashboard:dev": "npm --prefix frontend run dev",
-    "dashboard:build": "npm --prefix frontend run build"
+    "dashboard:build": "npm --prefix frontend run build",
+    "stats:backfill": "npx tsc && node build/scripts/backfillActivityStats.js"
   },
   "keywords": [],
   "author": "",

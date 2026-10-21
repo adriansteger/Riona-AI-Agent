@@ -87,6 +87,35 @@ export interface CharacterSummary {
   updatedAt: string;
 }
 
+export type StatsGranularity = 'hour' | 'day' | 'week' | 'month' | 'year';
+
+export interface StatTotals {
+  likes: number;
+  comments: number;
+  dms: number;
+  commentLikes: number;
+  dmRequestsAccepted: number;
+  spamRequestsDeleted: number;
+  actionBlocks: number;
+  rateLimits: number;
+  challenges: number;
+  errors: number;
+  sessions: number;
+  emptySessions: number;
+  activeMinutes: number;
+}
+
+export interface StatsResponse {
+  granularity: StatsGranularity;
+  tz: string;
+  from: string;
+  to: string;
+  buckets: Array<{ key: string } & StatTotals>;
+  totals: StatTotals;
+  previousTotals: StatTotals | null;
+  perAccount: Array<{ accountId: string } & StatTotals>;
+}
+
 const API_BASE = '/api/dashboard';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -230,5 +259,12 @@ export const api = {
   },
   async deleteCharacter(file: string) {
     return request<{ success: boolean }>(`/characters/${file}`, { method: 'DELETE' });
+  },
+
+  // Statistics
+  async getStats(params: { granularity: StatsGranularity; accountId?: string; from?: string; to?: string; prevFrom?: string; tz?: string }) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
+    return request<StatsResponse>(`/stats?${qs.toString()}`);
   },
 };

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { recordStat } from '../services/StatsRecorder';
 
 interface ActivityLog {
     [accountId: string]: {
@@ -102,6 +103,7 @@ export class ActivityTracker {
         if (!this.data[this.accountId][action]) this.data[this.accountId][action] = [];
         this.data[this.accountId][action].push(Date.now());
         this.saveData();
+        recordStat(this.accountId, action);
     }
 
     public getRecentCount(action: 'likes' | 'comments' | 'dms'): number {

@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { Cpu, Briefcase, Users, Plus, LogOut, Terminal } from 'lucide-react';
+import { Cpu, Briefcase, Users, Plus, LogOut, Terminal, BarChart3 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const navigate = useNavigate();
@@ -85,6 +85,25 @@ export const Navbar: React.FC = () => {
           >
             <Cpu size={14} />
             Instagram Bots
+          </NavLink>
+
+          <NavLink
+            to="/stats"
+            style={({ isActive }) => ({
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '13px',
+              fontWeight: 500,
+              backgroundColor: isActive ? 'var(--bg-surface-elevated)' : 'transparent',
+              color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+              border: `1px solid ${isActive ? 'var(--border-subtle)' : 'transparent'}`,
+            })}
+          >
+            <BarChart3 size={14} />
+            Statistics
           </NavLink>
 
           <NavLink

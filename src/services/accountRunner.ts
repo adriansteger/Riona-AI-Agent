@@ -4,6 +4,7 @@ import { chooseCharacter } from '../Agent';
 import { createAccountLogger } from '../config/logger';
 import { EmailService } from './EmailService';
 import { ScheduleTracker, ActivityTracker } from '../utils';
+import { recordStat } from './StatsRecorder';
 
 export interface AccountRunnerContext {
     activeSessions: Map<string, IgClient>;
@@ -196,6 +197,7 @@ export const processAccount = async (
         // --- REUSE OR CREATE CLIENT AND RUN INTERACTION ---
         try {
             const runSession = async () => {
+                const sessionStart = Date.now();
                 let igClient = activeSessions.get(account.id);
 
                 // If client exists but disconnected, clear it
@@ -279,6 +281,13 @@ export const processAccount = async (
                         activeSessions.delete(account.id);
                     }
 
+                    // Statistics: DM-only checks run every few minutes, so only full sessions count as sessions
+                    recordStat(trackerId, 'activeMinutes', Math.round((Date.now() - sessionStart) / 6000) / 10);
+                    if (!isDMOnlyRun) {
+                        recordStat(trackerId, 'sessions');
+                        if (actionsCompleted === 0) recordStat(trackerId, 'emptySessions');
+                    }
+
                     // Update the Rest/DM Cycles
                     if (isDMOnlyRun) {
                         const nextCheckMinutes = dmsProcessed ? 1 : (account.settings?.schedule?.dmCheckIntervalMinutes || 2);
@@ -318,6 +327,8 @@ export const processAccount = async (
 
     } catch (error: any) {
         accountLogger.error(`Error processing account ${account.id}: ${error}`);
+        const statsId = account.userDataDir ? path.basename(account.userDataDir) : account.username;
+        recordStat(statsId, 'errors');
         if (emailService) {
             emailService.sendErrorAlert(account.username, error.message || String(error), "Account Processing Crash").catch(() => { });
         }

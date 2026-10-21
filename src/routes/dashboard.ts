@@ -6,6 +6,7 @@ import { ConfigStore } from '../services/ConfigStore';
 import { CharacterStore } from '../services/CharacterStore';
 import { LogBus, LogEntry } from '../services/LogBus';
 import logger from '../config/logger';
+import { getStats, GRANULARITIES, Granularity } from '../services/StatsService';
 
 const router = express.Router();
 const botManager = BotManager.getInstance();
@@ -153,6 +154,34 @@ router.get('/overview', (_req: Request, res: Response) => {
         });
     } catch (err: any) {
         logger.error('[DashboardAPI] Error fetching overview:', err);
+        return res.status(500).json({ error: err.message || 'Internal server error' });
+    }
+});
+
+// ================= STATISTICS =================
+
+router.get('/stats', async (req: Request, res: Response) => {
+    try {
+        const granularity = String(req.query.granularity || 'day') as Granularity;
+        if (!GRANULARITIES.includes(granularity)) {
+            return res.status(400).json({ error: `granularity must be one of ${GRANULARITIES.join(', ')}` });
+        }
+        const parseDate = (v: unknown) => {
+            if (!v) return undefined;
+            const d = new Date(String(v));
+            return isNaN(d.getTime()) ? undefined : d;
+        };
+        const stats = await getStats({
+            granularity,
+            accountId: req.query.accountId ? String(req.query.accountId) : 'all',
+            from: parseDate(req.query.from),
+            to: parseDate(req.query.to),
+            prevFrom: parseDate(req.query.prevFrom),
+            tz: req.query.tz ? String(req.query.tz) : undefined,
+        });
+        return res.json(stats);
+    } catch (err: any) {
+        logger.error('[DashboardAPI] Error fetching stats:', err);
         return res.status(500).json({ error: err.message || 'Internal server error' });
     }
 });

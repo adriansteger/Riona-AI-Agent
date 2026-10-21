@@ -132,3 +132,7 @@ input:focus, select:focus, textarea:focus {
   border-radius: 50%;
   animation: pulseGlow 2s infinite ease-in-out;
 }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Login } from './pages/Login';
 import { Overview } from './pages/Overview';
@@ -5,6 +6,8 @@ import { AccountEdit } from './pages/AccountEdit';
 import { JobBotPage } from './pages/JobBotPage';
 import { CharactersPage } from './pages/CharactersPage';
 import { SystemLogsPage } from './pages/SystemLogsPage';
+
+const StatsPage = lazy(() => import('./pages/StatsPage').then(m => ({ default: m.StatsPage })));
 
 export function App() {
   return (
@@ -17,6 +20,7 @@ export function App() {
         <Route path="/accounts/:id" element={<Overview />} />
         <Route path="/jobbot" element={<JobBotPage />} />
         <Route path="/characters" element={<CharactersPage />} />
+        <Route path="/stats" element={<Suspense fallback={null}><StatsPage /></Suspense>} />
         <Route path="/logs" element={<SystemLogsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

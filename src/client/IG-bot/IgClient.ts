@@ -18,6 +18,7 @@ import { Contact } from '../../models/Contact';
 
 import { EmailService } from "../../services/EmailService";
 import { LikedPost } from "../../models/LikedPost";
+import { recordStat } from "../../services/StatsRecorder";
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -42,6 +43,11 @@ export class IgClient {
     private emailService?: EmailService;
     private headless: boolean | "shell";
     public dmsProcessedThisSession: boolean = false;
+
+    // Key used by ActivityTracker and statistics (matches account.id for profiles under ./profiles/<id>)
+    private get statsId(): string {
+        return this.userDataDir ? path.basename(this.userDataDir) : this.username;
+    }
 
     private languages: string[] = ['English'];
     private defaultLanguage: string = 'English';
@@ -1014,6 +1020,7 @@ export class IgClient {
 
             if (blockDialog) {
                 this.logger.warn(`Action Block detected during: ${context}`);
+                recordStat(this.statsId, 'actionBlocks');
                 if (this.emailService) {
                     await this.emailService.sendActionBlockAlert(this.username, context);
                 }
@@ -1105,6 +1112,7 @@ export class IgClient {
                 }
 
                 this.logger.error(`🚨 CRITICAL: reCAPTCHA DETECTED for user ${this.username} 🚨`);
+                recordStat(this.statsId, 'challenges');
                 this.logger.error(`URL: ${currentUrl}`);
 
                 // Send Email Alert
@@ -1184,6 +1192,7 @@ export class IgClient {
             if (isRateLimited) {
                 const currentUrl = this.page.url();
                 this.logger.error(`⛔ CRITICAL: HTTP 429 RATE LIMIT DETECTED for user ${this.username}.`);
+                recordStat(this.statsId, 'rateLimits');
                 this.logger.error(`URL: ${currentUrl}`);
 
                 // Send Email Alert
@@ -1495,6 +1504,7 @@ export class IgClient {
             if (!sendButton) throw new Error("Send button not found.");
             await sendButton.click();
             await this.handleNotificationPopup();
+            recordStat(this.statsId, 'dms');
             console.log("Message sent successfully");
         } catch (error) {
             logger.error(`Failed to send DM to ${username}`, error);
@@ -1508,7 +1518,7 @@ export class IgClient {
         if (!page) return;
 
         const dmsPerHour = limits?.dmsPerHour || 50;
-        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const accountId = this.statsId;
         const activityTracker = new ActivityTracker(accountId);
 
         try {
@@ -1653,6 +1663,7 @@ export class IgClient {
                                 await confirmBtnEl.evaluate(b => (b as HTMLElement).click());
                                 await delay(2000);
                                 this.logger.info("Successfully deleted spam group request.");
+                                recordStat(this.statsId, 'spamRequestsDeleted');
                             }
                         }
                     } catch (err) {
@@ -1718,6 +1729,7 @@ export class IgClient {
                     await page.waitForFunction(() => !document.querySelector('div[role="dialog"]'), { timeout: 3000 }).catch(() => {});
 
                     this.logger.info(`Accepted DM request ${i + 1}/${maxToAccept}`);
+                    recordStat(this.statsId, 'dmRequestsAccepted');
 
                     // Respond immediately to the newly accepted chat!
                     await this.respondToCurrentOpenChat(page, activityTracker, dmsPerHour);
@@ -2051,7 +2063,7 @@ export class IgClient {
         this.dmsProcessedThisSession = false;
 
         const dmsPerHour = limits?.dmsPerHour || 50;
-        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const accountId = this.statsId;
         const activityTracker = new ActivityTracker(accountId);
 
         if (!activityTracker.canPerformAction('dms', dmsPerHour)) {
@@ -2306,7 +2318,7 @@ export class IgClient {
         const maxCommentsPerHour = limits?.commentsPerHour || 5;
 
         // Initialize Activity Tracker
-        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const accountId = this.statsId;
         const activityTracker = new ActivityTracker(accountId);
         const maxLikesPerDay = limits?.likesPerDay;
         const dailyCapReached = () => !!maxLikesPerDay && activityTracker.getTodayCount('likes') >= maxLikesPerDay;
@@ -2569,6 +2581,7 @@ export class IgClient {
                                                     await this.humanLikeClick(btn);
                                                     await delay(getHumanLikeDelay(1500, 800));
                                                     likedCount++;
+                                                    recordStat(this.statsId, 'commentLikes');
                                                 }
                                             }
                                         }
@@ -2731,7 +2744,7 @@ export class IgClient {
         const maxLikesPerDay = limits?.likesPerDay;
 
         // Initialize Activity Tracker
-        const accountId = this.userDataDir ? path.basename(this.userDataDir) : this.username;
+        const accountId = this.statsId;
         const activityTracker = new ActivityTracker(accountId);
         const dailyCapReached = () => !!maxLikesPerDay && activityTracker.getTodayCount('likes') >= maxLikesPerDay;
 
@@ -3042,6 +3055,7 @@ export class IgClient {
                 } else {
                     this.logger.error(`Error interacting with post ${postIndex}: ${error.message}`);
                 }
+                recordStat(this.statsId, 'errors');
                 if (this.emailService) {
                     this.emailService.sendErrorAlert(this.username, error.message || "Unknown", "Feed Interaction Loop").catch(() => { });
                 }
