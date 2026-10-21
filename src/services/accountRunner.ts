@@ -120,15 +120,19 @@ export const processAccount = async (
         const activityTracker = new ActivityTracker(trackerId);
 
         // --- DAILY LIKE CAP ---
+        // Once reached, likes count as unavailable. The session only continues if comments or DMs can still run.
         const likesPerDay = Number(limits.likesPerDay) || 110;
-        if (!isDMOnlyRun && behavior.enableLikes !== false && !behavior.enableComments) {
-            const likesToday = activityTracker.getTodayCount('likes');
-            if (likesToday >= likesPerDay) {
+        const likesToday = activityTracker.getTodayCount('likes');
+        const likeCapReached = behavior.enableLikes !== false && likesToday >= likesPerDay;
+        if (!isDMOnlyRun && likeCapReached) {
+            const otherWorkEnabled = behavior.enableComments !== false || behavior.enableAutoDMs === true;
+            if (!otherWorkEnabled) {
                 const wakeTime = ScheduleTracker.getNextWakeTime(scheduleSettings.sleepEndHour ?? 7);
                 scheduleTracker.setNextActiveTime(wakeTime);
                 accountLogger.info(`Daily like cap reached (${likesToday}/${likesPerDay}). Resting until ${new Date(wakeTime).toLocaleString()}.`);
                 return;
             }
+            accountLogger.info(`Daily like cap reached (${likesToday}/${likesPerDay}) — continuing for comments/DMs only.`);
         }
 
         // --- LIKES PER SESSION RANDOMIZATION ---
@@ -155,7 +159,7 @@ export const processAccount = async (
             isBlocked = (behavior.enableAutoDMs === true && msToNextDM > 0);
         } else {
             // Check if at least ONE enabled action is available
-            if (behavior.enableLikes !== false && msToNextLike === 0) isBlocked = false;
+            if (behavior.enableLikes !== false && msToNextLike === 0 && !likeCapReached) isBlocked = false;
             if (behavior.enableComments !== false && msToNextComment === 0) isBlocked = false;
             if (behavior.enableAutoDMs === true && msToNextDM === 0) isBlocked = false;
         }
@@ -166,7 +170,7 @@ export const processAccount = async (
                 accountLogger.warn(`DM-only check skipped: Auto DM is on rate limit cooldown. Waiting ~${dmWait}m.`);
             } else {
                 const waits = [];
-                if (behavior.enableLikes !== false) waits.push(msToNextLike);
+                if (behavior.enableLikes !== false && !likeCapReached) waits.push(msToNextLike);
                 if (behavior.enableComments !== false) waits.push(msToNextComment);
                 if (behavior.enableAutoDMs === true) waits.push(msToNextDM);
 
