@@ -1813,9 +1813,10 @@ export class IgClient {
         if (!this.page.url().startsWith('https://www.instagram.com')) {
             await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "networkidle2" });
         }
-        const result = await this.page.evaluate(async (url) => {
+        // No async/await in here: with the es6 target TypeScript emits an __awaiter helper that doesn't exist in the page
+        const result = await this.page.evaluate((url) => {
             const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || '';
-            const res = await fetch(url, {
+            return fetch(url, {
                 credentials: 'include',
                 headers: {
                     'X-IG-App-ID': '936619743392459',
@@ -1823,9 +1824,7 @@ export class IgClient {
                     'X-Requested-With': 'XMLHttpRequest',
                     'Accept': 'application/json'
                 }
-            });
-            const text = await res.text();
-            return { status: res.status, text };
+            }).then(res => res.text().then(text => ({ status: res.status, text })));
         }, apiPath);
 
         if (result.status !== 200) throw new Error(`Instagram API ${apiPath} returned HTTP ${result.status}`);
