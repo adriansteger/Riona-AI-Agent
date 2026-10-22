@@ -217,4 +217,5 @@ export const saveScrapedData = async (link: string, content: string): Promise<vo
 export * from './activityTracker';
 export * from './browserHelper';
 export * from './concurrency';
+export * from './dailyCap';
 export * from './scheduleTracker';

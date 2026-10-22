@@ -17,6 +17,7 @@ export interface AccountSettings {
         likesPerHour?: number;
         likesPerSession?: string | number;
         likesPerDay?: number;
+        likesPerDayJitter?: number;
         commentsPerHour?: number;
         dmsPerHour?: number;
     };

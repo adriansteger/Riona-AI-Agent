@@ -487,7 +487,7 @@ export const AccountEdit: React.FC = () => {
 
               <div>
                 <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                  Likes / Day (Cap)
+                  Likes / Day (Average, ±20% per day)
                 </label>
                 <input
                   type="number"

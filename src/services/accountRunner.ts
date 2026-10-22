@@ -3,7 +3,7 @@ import { IgClient } from '../client/IG-bot/IgClient';
 import { chooseCharacter } from '../Agent';
 import { createAccountLogger } from '../config/logger';
 import { EmailService } from './EmailService';
-import { ScheduleTracker, ActivityTracker } from '../utils';
+import { ScheduleTracker, ActivityTracker, getDailyLikeCap } from '../utils';
 import { recordStat } from './StatsRecorder';
 
 export interface AccountRunnerContext {
@@ -122,7 +122,12 @@ export const processAccount = async (
 
         // --- DAILY LIKE CAP ---
         // Once reached, likes count as unavailable. The session only continues if comments or DMs can still run.
-        const likesPerDay = Number(limits.likesPerDay) || 110;
+        // limits.likesPerDay is the average; the effective cap varies per account per day.
+        const likesPerDay = getDailyLikeCap(
+            account.id,
+            Number(limits.likesPerDay) || 110,
+            limits.likesPerDayJitter !== undefined ? Number(limits.likesPerDayJitter) : 20
+        );
         const likesToday = activityTracker.getTodayCount('likes');
         const likeCapReached = behavior.enableLikes !== false && likesToday >= likesPerDay;
         if (!isDMOnlyRun && likeCapReached) {
