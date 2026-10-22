@@ -94,6 +94,7 @@ export interface StatTotals {
   likes: number;
   comments: number;
   dms: number;
+  posts: number;
   commentLikes: number;
   dmRequestsAccepted: number;
   spamRequestsDeleted: number;
@@ -118,6 +119,65 @@ export interface StatsResponse {
 }
 
 const API_BASE = '/api/dashboard';
+
+export type TaskState = 'queued' | 'running' | 'done' | 'failed';
+
+export interface TaskStatus {
+  id: string;
+  accountId: string;
+  kind: string;
+  status: TaskState;
+  result?: any;
+  error?: string;
+  createdAt: number;
+  finishedAt?: number;
+}
+
+export interface DmThread {
+  accountId: string;
+  threadId: string;
+  title: string;
+  participants: Array<{ username: string; fullName?: string; profilePicUrl?: string }>;
+  isGroup: boolean;
+  lastMessageAt?: string;
+  lastMessagePreview?: string;
+  lastMessageFromMe?: boolean;
+  unread: boolean;
+  aiEnabled: boolean;
+  syncedAt?: string;
+}
+
+export interface DmMessage {
+  _id: string;
+  itemId: string;
+  threadId: string;
+  fromMe: boolean;
+  senderUsername?: string;
+  text: string;
+  kind: 'text' | 'media' | 'link' | 'other';
+  timestamp: string;
+}
+
+export type PostType = 'photo' | 'carousel' | 'reel';
+export type PostStatus = 'draft' | 'scheduled' | 'publishing' | 'published' | 'failed';
+
+export interface ScheduledPost {
+  _id: string;
+  accountId: string;
+  type: PostType;
+  media: Array<{ file: string; mime: string; size: number }>;
+  caption: string;
+  scheduledAt?: string;
+  status: PostStatus;
+  attempts: number;
+  lastError?: string;
+  publishedAt?: string;
+  permalink?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const mediaUrl = (accountId: string, file: string) => `${API_BASE}/media/${encodeURIComponent(accountId)}/${encodeURIComponent(file)}`;
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('dash_token');
@@ -147,6 +207,38 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     throw new Error(data.error || `HTTP ${res.status}`);
   }
   return data as T;
+}
+
+async function upload<T>(endpoint: string, form: FormData, method: string = 'POST'): Promise<T> {
+  // No Content-Type header: the browser sets the multipart boundary itself
+  const token = localStorage.getItem('dash_token');
+  const res = await fetch(`${API_BASE}${endpoint}`, {
+    method,
+    body: form,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    credentials: 'include',
+  });
+  if (res.status === 401 && !window.location.pathname.includes('/login')) {
+    localStorage.removeItem('dash_token');
+    window.location.href = '/login';
+    throw new Error('Unauthorized');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data as T;
+}
+
+/** Polls a background browser task until it finishes. Rejects with the task's error if it failed. */
+export async function waitForTask(taskId: string, onUpdate?: (task: TaskStatus) => void, intervalMs: number = 2000): Promise<TaskStatus> {
+  for (;;) {
+    const { task } = await request<{ task: TaskStatus }>(`/tasks/${taskId}`);
+    onUpdate?.(task);
+    if (task.status === 'done') return task;
+    if (task.status === 'failed') throw new Error(task.error || 'Task failed');
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
 }
 
 export const api = {
@@ -260,6 +352,63 @@ export const api = {
   },
   async deleteCharacter(file: string) {
     return request<{ success: boolean }>(`/characters/${file}`, { method: 'DELETE' });
+  },
+
+  // DM Inbox
+  async getDmThreads(accountId: string) {
+    return request<{ threads: DmThread[]; lastSyncedAt: string | null }>(`/accounts/${accountId}/dms`);
+  },
+  async getDmThread(accountId: string, threadId: string) {
+    return request<{ thread: DmThread; messages: DmMessage[] }>(`/accounts/${accountId}/dms/${encodeURIComponent(threadId)}`);
+  },
+  async refreshInbox(accountId: string) {
+    return request<{ taskId: string }>(`/accounts/${accountId}/dms/refresh`, { method: 'POST' });
+  },
+  async refreshDmThread(accountId: string, threadId: string) {
+    return request<{ taskId: string }>(`/accounts/${accountId}/dms/${encodeURIComponent(threadId)}/refresh`, { method: 'POST' });
+  },
+  async sendDm(accountId: string, threadId: string, text: string) {
+    return request<{ taskId: string }>(`/accounts/${accountId}/dms/${encodeURIComponent(threadId)}/send`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+  },
+  async setDmThreadAi(accountId: string, threadId: string, aiEnabled: boolean) {
+    return request<{ success: boolean; thread: DmThread }>(`/accounts/${accountId}/dms/${encodeURIComponent(threadId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ aiEnabled }),
+    });
+  },
+  async suggestDmReply(accountId: string, threadId: string) {
+    return request<{ suggestion: string }>(`/accounts/${accountId}/dms/${encodeURIComponent(threadId)}/suggest`, { method: 'POST' });
+  },
+
+  // Content planner
+  async getPosts(accountId: string, params: { from?: string; to?: string } = {}) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
+    return request<{ posts: ScheduledPost[] }>(`/accounts/${accountId}/posts?${qs.toString()}`);
+  },
+  async createPost(accountId: string, form: FormData) {
+    return upload<{ success: boolean; post: ScheduledPost }>(`/accounts/${accountId}/posts`, form);
+  },
+  async updatePost(postId: string, data: { caption?: string; scheduledAt?: string | null; status?: 'draft' | 'scheduled'; mediaOrder?: string[] }) {
+    return request<{ success: boolean; post: ScheduledPost }>(`/posts/${postId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+  async deletePost(postId: string) {
+    return request<{ success: boolean }>(`/posts/${postId}`, { method: 'DELETE' });
+  },
+  async publishPostNow(postId: string) {
+    return request<{ taskId: string }>(`/posts/${postId}/publish-now`, { method: 'POST' });
+  },
+  async generateCaption(accountId: string, brief: string, type: PostType) {
+    return request<{ caption: string; hashtags: string[] }>(`/accounts/${accountId}/caption`, {
+      method: 'POST',
+      body: JSON.stringify({ brief, type }),
+    });
   },
 
   // Statistics

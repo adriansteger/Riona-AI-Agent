@@ -233,7 +233,7 @@ export const AccountEdit: React.FC = () => {
                 alignItems: 'center',
                 gap: '6px',
                 padding: '6px 12px',
-                backgroundColor: 'rgba(248, 81, 73, 0.12)',
+                backgroundColor: 'var(--state-error-bg)',
                 border: '1px solid var(--state-error-border)',
                 color: 'var(--state-error)',
                 borderRadius: 'var(--radius-md)',

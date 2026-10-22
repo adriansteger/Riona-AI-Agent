@@ -145,14 +145,14 @@ export const Overview: React.FC = () => {
                 <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>likes</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <MessageCircle size={14} color="#58a6ff" />
+                <MessageCircle size={14} color="var(--state-sleeping)" />
                 <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {totalComments1h}
                 </span>
                 <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>comments</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Send size={14} color="#3fb950" />
+                <Send size={14} color="var(--state-running)" />
                 <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {totalDMs1h}
                 </span>
@@ -196,14 +196,14 @@ export const Overview: React.FC = () => {
                 <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>likes</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <MessageCircle size={14} color="#58a6ff" />
+                <MessageCircle size={14} color="var(--state-sleeping)" />
                 <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {totalCommentsToday}
                 </span>
                 <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>comments</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Send size={14} color="#3fb950" />
+                <Send size={14} color="var(--state-running)" />
                 <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {totalDMsToday}
                 </span>
@@ -254,7 +254,7 @@ export const Overview: React.FC = () => {
                 gap: '5px',
                 padding: '6px 12px',
                 borderRadius: 'var(--radius-sm)',
-                backgroundColor: jobBot?.running ? 'rgba(248,81,73,0.12)' : 'var(--state-running-bg)',
+                backgroundColor: jobBot?.running ? 'var(--state-error-bg)' : 'var(--state-running-bg)',
                 border: `1px solid ${jobBot?.running ? 'var(--state-error-border)' : 'var(--state-running-border)'}`,
                 color: jobBot?.running ? 'var(--state-error)' : 'var(--state-running)',
                 fontSize: '12px',
@@ -378,7 +378,7 @@ export const Overview: React.FC = () => {
               zIndex: 100,
               backgroundColor: 'var(--bg-surface)',
               borderTop: '2px solid var(--accent)',
-              boxShadow: '0 -10px 30px rgba(0,0,0,0.8)',
+              boxShadow: 'var(--shadow-drawer)',
               padding: '16px 24px',
               maxHeight: '60vh',
               display: 'flex',

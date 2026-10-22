@@ -34,6 +34,9 @@ app.use(helmet({
       "script-src": ["'self'", "'unsafe-inline'"],
       "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       "font-src": ["'self'", "https://fonts.gstatic.com"],
+      // Instagram profile pictures in the dashboard inbox
+      "img-src": ["'self'", "data:", "blob:", "https://*.cdninstagram.com", "https://*.fbcdn.net"],
+      "media-src": ["'self'", "blob:"],
       "connect-src": ["'self'"]
     },
   },

@@ -1,10 +1,13 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { Cpu, Briefcase, Users, Plus, LogOut, Terminal, BarChart3 } from 'lucide-react';
+import { useTheme } from '../theme';
+import { Cpu, Briefcase, Users, Plus, LogOut, Terminal, BarChart3, CalendarDays, MessageSquare, Sun, Moon } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const navigate = useNavigate();
+  const [theme, toggleTheme] = useTheme();
+  const themeLabel = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
 
   const handleLogout = async () => {
     try {
@@ -49,7 +52,7 @@ export const Navbar: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: '#080a0d',
+              color: 'var(--text-inverse)',
               fontWeight: 700,
             }}
           >
@@ -74,7 +77,7 @@ export const Navbar: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '6px 14px',
+              padding: '6px 11px',
               borderRadius: 'var(--radius-md)',
               fontSize: '13px',
               fontWeight: 500,
@@ -93,7 +96,7 @@ export const Navbar: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '6px 14px',
+              padding: '6px 11px',
               borderRadius: 'var(--radius-md)',
               fontSize: '13px',
               fontWeight: 500,
@@ -107,12 +110,50 @@ export const Navbar: React.FC = () => {
           </NavLink>
 
           <NavLink
+            to="/content"
+            style={({ isActive }) => ({
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 11px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '13px',
+              fontWeight: 500,
+              backgroundColor: isActive ? 'var(--bg-surface-elevated)' : 'transparent',
+              color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+              border: `1px solid ${isActive ? 'var(--border-subtle)' : 'transparent'}`,
+            })}
+          >
+            <CalendarDays size={14} />
+            Content
+          </NavLink>
+
+          <NavLink
+            to="/inbox"
+            style={({ isActive }) => ({
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 11px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '13px',
+              fontWeight: 500,
+              backgroundColor: isActive ? 'var(--bg-surface-elevated)' : 'transparent',
+              color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+              border: `1px solid ${isActive ? 'var(--border-subtle)' : 'transparent'}`,
+            })}
+          >
+            <MessageSquare size={14} />
+            Inbox
+          </NavLink>
+
+          <NavLink
             to="/jobbot"
             style={({ isActive }) => ({
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '6px 14px',
+              padding: '6px 11px',
               borderRadius: 'var(--radius-md)',
               fontSize: '13px',
               fontWeight: 500,
@@ -131,7 +172,7 @@ export const Navbar: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '6px 14px',
+              padding: '6px 11px',
               borderRadius: 'var(--radius-md)',
               fontSize: '13px',
               fontWeight: 500,
@@ -150,7 +191,7 @@ export const Navbar: React.FC = () => {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '6px 14px',
+              padding: '6px 11px',
               borderRadius: 'var(--radius-md)',
               fontSize: '13px',
               fontWeight: 500,
@@ -166,7 +207,7 @@ export const Navbar: React.FC = () => {
       </div>
 
       {/* Right Actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
         <button
           onClick={() => navigate('/accounts/new')}
           style={{
@@ -186,6 +227,24 @@ export const Navbar: React.FC = () => {
         >
           <Plus size={14} strokeWidth={2.5} />
           New Bot
+        </button>
+
+        <button
+          onClick={toggleTheme}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            alignSelf: 'stretch', // match the height of the text buttons beside it
+            padding: '0 9px',
+            backgroundColor: 'var(--bg-surface-elevated)',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+          }}
+          title={themeLabel}
+          aria-label={themeLabel}
+        >
+          {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
         </button>
 
         <button

@@ -5,19 +5,46 @@ import { createAccountLogger } from '../config/logger';
 import { EmailService } from './EmailService';
 import { ScheduleTracker, ActivityTracker, getDailyLikeCap } from '../utils';
 import { recordStat } from './StatsRecorder';
+import { saveInboxThreads } from './DmStore';
 
 export interface AccountRunnerContext {
     activeSessions: Map<string, IgClient>;
     sessionLimit: (fn: () => Promise<any>) => Promise<any>;
     interactionLimit: (fn: () => Promise<any>) => Promise<any>;
+    // Serializes everything that opens this account's browser profile (bot cycles and dashboard tasks)
+    withAccountLock: <T>(accountId: string, fn: () => Promise<T>) => Promise<T>;
     emailService?: EmailService;
 }
+
+export const createIgClient = (
+    account: any,
+    options: { headless: boolean; character: any; logger: any; emailService?: EmailService }
+): IgClient => {
+    return new IgClient({
+        accountId: account.id,
+        username: account.username,
+        password: account.password,
+        userDataDir: account.userDataDir,
+        proxy: account.proxy,
+        languages: account.settings?.languages,
+        defaultLanguage: account.settings?.defaultLanguage,
+        headless: options.headless
+    }, options.logger, options.character, options.emailService);
+};
+
+const syncInboxQuietly = async (igClient: IgClient, accountId: string, accountLogger: any): Promise<void> => {
+    try {
+        await saveInboxThreads(accountId, await igClient.fetchInbox(20, { allowScrape: false }));
+    } catch (err) {
+        accountLogger.warn(`[DM Sync] Inbox sync failed: ${err}`);
+    }
+};
 
 export const processAccount = async (
     account: any,
     context: AccountRunnerContext
 ): Promise<void> => {
-    const { activeSessions, sessionLimit, interactionLimit, emailService } = context;
+    const { activeSessions, sessionLimit, interactionLimit, withAccountLock, emailService } = context;
 
     // Stagger start slightly (0-5s) to avoid CPU spikes if multiple launch at once
     const stagger = Math.floor(Math.random() * 5000);
@@ -219,15 +246,7 @@ export const processAccount = async (
                             : isDMOnlyRun);
 
                     // Initialize New Client
-                    igClient = new IgClient({
-                        username: account.username,
-                        password: account.password,
-                        userDataDir: account.userDataDir,
-                        proxy: account.proxy,
-                        languages: account.settings?.languages,
-                        defaultLanguage: account.settings?.defaultLanguage,
-                        headless: headlessMode
-                    }, accountLogger, character, emailService);
+                    igClient = createIgClient(account, { headless: headlessMode, character, logger: accountLogger, emailService });
 
                     activeSessions.set(account.id, igClient);
                 } else {
@@ -245,8 +264,11 @@ export const processAccount = async (
 
                     // Check for Auto DMs if enabled in settings
                     if (behavior.enableAutoDMs) {
+                        // Keep the dashboard inbox fresh; sync first so unread state is captured before the bot opens threads
+                        await syncInboxQuietly(igClient, account.id, accountLogger);
                         accountLogger.info("Checking for DMs (enabled in settings)...");
                         await igClient.checkAndRespondToDMs({ dmsPerHour: limits.dmsPerHour });
+                        if (igClient.dmsProcessedThisSession) await syncInboxQuietly(igClient, account.id, accountLogger);
                     }
 
                     // Logic: If hashtags exist, use 'hashtagMix' probability to choose Hashtags.
@@ -319,12 +341,13 @@ export const processAccount = async (
                 }
             };
 
+            // Lock order is always account lock -> interaction slot -> session slot to avoid deadlocks
             if (isDMOnlyRun) {
-                await sessionLimit(runSession);
+                await withAccountLock(account.id, () => sessionLimit(runSession));
             } else {
-                await interactionLimit(async () => {
+                await withAccountLock(account.id, () => interactionLimit(async () => {
                     await sessionLimit(runSession);
-                });
+                }));
             }
         } catch (err) {
             throw err;

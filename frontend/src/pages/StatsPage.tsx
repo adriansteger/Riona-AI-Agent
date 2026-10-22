@@ -7,26 +7,26 @@ import { Navbar } from '../components/Navbar';
 import { api } from '../api/client';
 import type { SanitizedAccount, StatsGranularity, StatsResponse, StatTotals } from '../api/client';
 
-// Series colours, validated for CVD separation and contrast against --bg-surface (dataviz validator).
+// Series colours, validated for CVD separation and contrast against --bg-surface in both themes (dataviz validator); values live in index.css.
 // Likes/comments/DMs keep the hue families used on the Overview cards.
 type MetricKey = keyof StatTotals;
 type Series = { key: MetricKey; label: string; color: string };
 
 const INTERACTION_SERIES: Series[] = [
-  { key: 'likes', label: 'Likes', color: '#e8502c' },
-  { key: 'comments', label: 'Comments', color: '#3987e5' },
-  { key: 'dms', label: 'DMs', color: '#2ea043' },
-  { key: 'commentLikes', label: 'Comment likes', color: '#9085e9' },
+  { key: 'likes', label: 'Likes', color: 'var(--chart-orange)' },
+  { key: 'comments', label: 'Comments', color: 'var(--chart-blue)' },
+  { key: 'dms', label: 'DMs', color: 'var(--chart-green)' },
+  { key: 'commentLikes', label: 'Comment likes', color: 'var(--chart-violet)' },
 ];
 const PROBLEM_SERIES: Series[] = [
-  { key: 'actionBlocks', label: 'Action blocks', color: '#e66767' },
-  { key: 'rateLimits', label: 'Rate limits (429)', color: '#9085e9' },
-  { key: 'challenges', label: 'Challenges', color: '#c98500' },
-  { key: 'errors', label: 'Errors', color: '#199e70' },
+  { key: 'actionBlocks', label: 'Action blocks', color: 'var(--chart-red)' },
+  { key: 'rateLimits', label: 'Rate limits (429)', color: 'var(--chart-violet)' },
+  { key: 'challenges', label: 'Challenges', color: 'var(--chart-yellow)' },
+  { key: 'errors', label: 'Errors', color: 'var(--chart-aqua)' },
 ];
 const SESSION_SERIES: Series[] = [
-  { key: 'sessions', label: 'Productive sessions', color: '#3987e5' }, // value = sessions - emptySessions
-  { key: 'emptySessions', label: 'Empty sessions', color: '#c98500' },
+  { key: 'sessions', label: 'Productive sessions', color: 'var(--chart-blue)' }, // value = sessions - emptySessions
+  { key: 'emptySessions', label: 'Empty sessions', color: 'var(--chart-yellow)' },
 ];
 
 const GRANULARITY_OPTIONS: Array<{ value: StatsGranularity; label: string; hint: string }> = [
@@ -38,7 +38,7 @@ const GRANULARITY_OPTIONS: Array<{ value: StatsGranularity; label: string; hint:
 ];
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const SURFACE = '#0f1318'; // --bg-surface, used for the 2px gap between stacked segments
+const SURFACE = 'var(--bg-surface)'; // used for the 2px gap between stacked segments
 
 // ---------- Time windows (browser-local calendar) ----------
 
@@ -243,7 +243,7 @@ const StackedBars: React.FC<{
           />
           <YAxis allowDecimals={false} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
           <Tooltip
-            cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+            cursor={{ fill: 'var(--chart-cursor)' }}
             content={(props: any) => <ChartTooltip {...props} series={series} granularity={granularity} />}
           />
           {series.map((s, i) => (

@@ -140,5 +140,6 @@ src/Agent/characters/Lanaxoo.Agent.json
 src/config/job_accounts.json
 screenshots
 data/job_history.json
+data/media
 frontend/dist
 frontend/node_modules

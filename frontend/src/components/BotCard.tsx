@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import type { AccountOverview } from '../api/client';
 import { StatusBadge } from './StatusBadge';
 import { Countdown } from './Countdown';
-import { Play, Square, Pause, RotateCw, Terminal, Settings, Heart, MessageCircle, Send, Moon } from 'lucide-react';
+import { Play, Square, Pause, RotateCw, Terminal, Settings, Heart, MessageCircle, Send, Moon, CalendarDays, MessageSquare } from 'lucide-react';
 
 interface Props {
   data: AccountOverview;
@@ -112,7 +112,7 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
 
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-muted)' }}>
-            <MessageCircle size={12} color="#58a6ff" />
+            <MessageCircle size={12} color="var(--state-sleeping)" />
             Comments
           </div>
           <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
@@ -125,7 +125,7 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
 
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-muted)' }}>
-            <Send size={12} color="#3fb950" />
+            <Send size={12} color="var(--state-running)" />
             Auto DMs
           </div>
           <div style={{ fontSize: '14px', fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
@@ -211,7 +211,7 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
                     alignItems: 'center',
                     gap: '4px',
                     padding: '5px 10px',
-                    backgroundColor: 'rgba(57, 197, 187, 0.15)',
+                    backgroundColor: 'var(--state-paused-bg)',
                     border: '1px solid var(--state-paused-border)',
                     color: 'var(--state-paused)',
                     borderRadius: 'var(--radius-sm)',
@@ -253,7 +253,7 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
                   alignItems: 'center',
                   gap: '4px',
                   padding: '5px 10px',
-                  backgroundColor: 'rgba(248, 81, 73, 0.12)',
+                  backgroundColor: 'var(--state-error-bg)',
                   border: '1px solid var(--state-error-border)',
                   color: 'var(--state-error)',
                   borderRadius: 'var(--radius-sm)',
@@ -306,6 +306,38 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
           >
             <Terminal size={12} />
             Logs
+          </button>
+
+          <button
+            onClick={() => navigate(`/content/${account.id}`)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              padding: '5px 8px',
+              backgroundColor: 'var(--bg-surface-elevated)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-secondary)',
+              borderRadius: 'var(--radius-sm)',
+            }}
+            title="Plan and publish posts"
+          >
+            <CalendarDays size={13} />
+          </button>
+
+          <button
+            onClick={() => navigate(`/inbox/${account.id}`)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              padding: '5px 8px',
+              backgroundColor: 'var(--bg-surface-elevated)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-secondary)',
+              borderRadius: 'var(--radius-sm)',
+            }}
+            title="Read and answer DMs"
+          >
+            <MessageSquare size={13} />
           </button>
 
           <button

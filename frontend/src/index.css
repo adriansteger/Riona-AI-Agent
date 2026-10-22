@@ -1,9 +1,14 @@
+/* Dark is the default theme; index.html sets data-theme before first paint. */
 :root {
+  color-scheme: dark;
+
   --bg-canvas: #080a0d;
   --bg-surface: #0f1318;
   --bg-surface-elevated: #151a22;
   --bg-surface-hover: #1b212b;
   --bg-surface-active: #222936;
+  --bg-code: #050709;
+  --overlay: rgba(0, 0, 0, 0.7);
 
   --border-subtle: #1e2631;
   --border-medium: #2a3443;
@@ -18,6 +23,8 @@
   --accent-hover: #ff6e4d;
   --accent-active: #e64522;
   --accent-glow: rgba(255, 87, 51, 0.2);
+  --accent-bg: rgba(255, 87, 51, 0.12);
+  --accent-border: rgba(255, 87, 51, 0.3);
 
   --state-running: #3fb950;
   --state-running-bg: rgba(63, 185, 80, 0.12);
@@ -43,6 +50,16 @@
   --state-error-bg: rgba(248, 81, 73, 0.12);
   --state-error-border: rgba(248, 81, 73, 0.3);
 
+  /* Chart series hues (StatsPage), validated per theme against --bg-surface */
+  --chart-orange: #e8502c;
+  --chart-blue: #3987e5;
+  --chart-green: #2ea043;
+  --chart-violet: #9085e9;
+  --chart-red: #e66767;
+  --chart-yellow: #c98500;
+  --chart-aqua: #199e70;
+  --chart-cursor: rgba(255, 255, 255, 0.04);
+
   --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
@@ -54,6 +71,65 @@
   --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.4);
   --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.5);
   --shadow-modal: 0 20px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px var(--border-medium);
+  --shadow-drawer: 0 -10px 30px rgba(0, 0, 0, 0.8);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-canvas: #f4f6f8;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f6f8fa;
+  --bg-surface-hover: #eef1f4;
+  --bg-surface-active: #e4e8ed;
+  --bg-code: #f6f8fa;
+  --overlay: rgba(15, 20, 25, 0.35);
+
+  --border-subtle: #e2e6eb;
+  --border-medium: #d0d6de;
+  --border-prominent: #a9b3c0;
+
+  --text-primary: #0f1419;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7684;
+  /* --text-inverse is only ever text on --accent, so it stays dark */
+
+  --accent-glow: rgba(255, 87, 51, 0.18);
+
+  --state-running: #1a7f37;
+  --state-running-bg: rgba(26, 127, 55, 0.1);
+  --state-running-border: rgba(26, 127, 55, 0.28);
+
+  --state-resting: #9a6700;
+  --state-resting-bg: rgba(154, 103, 0, 0.1);
+  --state-resting-border: rgba(154, 103, 0, 0.28);
+
+  --state-sleeping: #0969da;
+  --state-sleeping-bg: rgba(9, 105, 218, 0.1);
+  --state-sleeping-border: rgba(9, 105, 218, 0.28);
+
+  --state-paused: #0b7d74;
+  --state-paused-bg: rgba(11, 125, 116, 0.1);
+  --state-paused-border: rgba(11, 125, 116, 0.28);
+
+  --state-stopped: #6e7781;
+  --state-stopped-bg: rgba(110, 119, 129, 0.1);
+  --state-stopped-border: rgba(110, 119, 129, 0.28);
+
+  --state-error: #cf222e;
+  --state-error-bg: rgba(207, 34, 46, 0.1);
+  --state-error-border: rgba(207, 34, 46, 0.28);
+
+  --chart-blue: #2a78d6;
+  --chart-green: #1f8f3a;
+  --chart-violet: #6250d6;
+  --chart-red: #e34948;
+  --chart-cursor: rgba(15, 20, 25, 0.04);
+
+  --shadow-subtle: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-card: 0 1px 3px rgba(16, 24, 40, 0.08), 0 4px 12px rgba(16, 24, 40, 0.06);
+  --shadow-modal: 0 20px 40px rgba(16, 24, 40, 0.18), 0 0 0 1px var(--border-medium);
+  --shadow-drawer: 0 -8px 24px rgba(16, 24, 40, 0.12);
 }
 
 * {

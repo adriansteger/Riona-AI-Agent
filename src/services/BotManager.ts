@@ -1,11 +1,14 @@
 import path from 'path';
+import crypto from 'crypto';
 import logger, { createAccountLogger } from '../config/logger';
 import { pLimit, ScheduleTracker, ActivityTracker } from '../utils';
 import { IgClient } from '../client/IG-bot/IgClient';
 import { EmailService } from './EmailService';
 import { JobClient } from '../client/JobBot/JobClient';
 import { ConfigStore, SanitizedAccountConfig, JobBotConfig } from './ConfigStore';
-import { processAccount } from './accountRunner';
+import { processAccount, createIgClient } from './accountRunner';
+import { chooseCharacter } from '../Agent';
+import { PostScheduler } from './PostScheduler';
 
 export type BotLifecycleState = 'running' | 'resting' | 'sleeping' | 'paused' | 'stopped' | 'disabled' | 'idle';
 
@@ -31,6 +34,21 @@ export interface AccountOverview {
     lastRunAt?: number;
 }
 
+export type TaskStatus = 'queued' | 'running' | 'done' | 'failed';
+
+export interface TaskEntry {
+    id: string;
+    accountId: string;
+    kind: string;
+    status: TaskStatus;
+    result?: any;
+    error?: string;
+    createdAt: number;
+    finishedAt?: number;
+}
+
+const TASK_TTL_MS = 60 * 60 * 1000;
+
 interface RuntimeEntry {
     state: 'idle' | 'paused' | 'stopped';
     stopRequested: boolean;
@@ -45,6 +63,8 @@ export class BotManager {
     private configStore: ConfigStore;
     private activeSessions = new Map<string, IgClient>();
     private runtimes = new Map<string, RuntimeEntry>();
+    private accountLocks = new Map<string, Promise<void>>();
+    private tasks = new Map<string, TaskEntry>();
 
     private sessionLimit: any;
     private interactionLimit: any;
@@ -117,6 +137,94 @@ export class BotManager {
         }
     }
 
+    // --- PER-ACCOUNT BROWSER ACCESS ---
+
+    /**
+     * Runs fn exclusively for this account. Bot cycles and dashboard tasks share one Chrome profile,
+     * so two of them must never launch a browser for the same account at the same time.
+     */
+    public withAccountLock = <T>(accountId: string, fn: () => Promise<T>): Promise<T> => {
+        const previous = this.accountLocks.get(accountId) || Promise.resolve();
+        const run = previous.then(fn, fn);
+        const tail = run.then(() => {}, () => {});
+        this.accountLocks.set(accountId, tail);
+        tail.then(() => {
+            if (this.accountLocks.get(accountId) === tail) this.accountLocks.delete(accountId);
+        });
+        return run;
+    };
+
+    /**
+     * Opens a browser session for the account (outside of its bot loop), runs fn and closes it again.
+     * Works whether or not the account's loop is running.
+     */
+    public async runWithClient<T>(accountId: string, fn: (client: IgClient) => Promise<T>): Promise<T> {
+        const account = this.configStore.getAccount(accountId);
+        if (!account) throw new Error('Account not found in config.');
+
+        const accountLogger = createAccountLogger(accountId);
+        return this.withAccountLock(accountId, () => this.sessionLimit(async () => {
+            const headless = account.settings?.headless !== undefined
+                ? !!account.settings.headless
+                : (process.env.HEADLESS !== undefined ? process.env.HEADLESS === 'true' : true);
+            const character = chooseCharacter(account.character);
+            // Kept out of activeSessions so the bot loop's rest/sleep cleanup never closes it mid-task
+            const client = createIgClient(account, { headless, character, logger: accountLogger, emailService: this.globalAlertEmailService });
+            try {
+                await client.init();
+                return await fn(client);
+            } finally {
+                await client.close().catch(() => {});
+            }
+        }));
+    }
+
+    /** Runs a browser task in the background and returns its id for polling. */
+    public enqueueTask(
+        accountId: string,
+        kind: string,
+        fn: (client: IgClient) => Promise<any>,
+        onFailed?: (err: any) => Promise<void> | void
+    ): TaskEntry {
+        this.pruneTasks();
+        const task: TaskEntry = { id: crypto.randomUUID(), accountId, kind, status: 'queued', createdAt: Date.now() };
+        this.tasks.set(task.id, task);
+
+        const accountLogger = createAccountLogger(accountId);
+        accountLogger.info(`[BotManager] Queued dashboard task "${kind}" (${task.id})`);
+        this.runWithClient(accountId, async (client) => {
+            task.status = 'running';
+            return fn(client);
+        }).then((result) => {
+            task.status = 'done';
+            task.result = result;
+        }).catch((err: any) => {
+            task.status = 'failed';
+            task.error = err?.message || String(err);
+            accountLogger.error(`[BotManager] Dashboard task "${kind}" failed: ${task.error}`);
+            // Also covers failures before fn ran (browser launch, login)
+            return Promise.resolve(onFailed?.(err)).catch(() => {});
+        }).finally(() => {
+            task.finishedAt = Date.now();
+        });
+        return task;
+    }
+
+    public getAlertEmailService(): EmailService | undefined {
+        return this.globalAlertEmailService;
+    }
+
+    public getTask(taskId: string): TaskEntry | undefined {
+        return this.tasks.get(taskId);
+    }
+
+    private pruneTasks(): void {
+        const cutoff = Date.now() - TASK_TTL_MS;
+        for (const [id, task] of this.tasks) {
+            if (task.finishedAt && task.finishedAt < cutoff) this.tasks.delete(id);
+        }
+    }
+
     // --- INSTAGRAM BOT CONTROLS ---
 
     public start(accountId: string): { success: boolean; message?: string } {
@@ -157,6 +265,7 @@ export class BotManager {
                             activeSessions: this.activeSessions,
                             sessionLimit: this.sessionLimit,
                             interactionLimit: this.interactionLimit,
+                            withAccountLock: this.withAccountLock,
                             emailService: this.globalAlertEmailService
                         });
                     }
@@ -464,6 +573,8 @@ export class BotManager {
         for (const account of enabledAccounts) {
             this.start(account.id);
         }
+
+        PostScheduler.getInstance().start();
 
         const jobAccounts = this.configStore.getJobAccounts();
         const jobEnabled = jobAccounts.jobBots?.some(b => b.enabled);

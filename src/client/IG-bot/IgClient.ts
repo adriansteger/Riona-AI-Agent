@@ -10,7 +10,7 @@ import logger from "../../config/logger";
 import { Instagram_cookiesExist, loadCookies, saveCookies, ActivityTracker, killChromeProcessByProfile, getHumanLikeDelay, getBrowserExecutablePath } from "../../utils";
 import { runAgent } from "../../Agent";
 import path from "path";
-import { getInstagramCommentSchema, getInstagramDMResponseSchema } from "../../Agent/schema";
+import { getInstagramCommentSchema } from "../../Agent/schema";
 import readline from "readline";
 import fs from "fs/promises";
 import { getShouldExitInteractions } from '../../api/agent';
@@ -19,6 +19,9 @@ import { Contact } from '../../models/Contact';
 import { EmailService } from "../../services/EmailService";
 import { LikedPost } from "../../models/LikedPost";
 import { recordStat } from "../../services/StatsRecorder";
+import { generateDmReply } from "../../services/DmReplyGenerator";
+import { DmThread } from "../../models/DmThread";
+import mongoose from "mongoose";
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -31,11 +34,41 @@ puppeteerExtra.use(
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export class PostMaybePublishedError extends Error {
+    constructor(message: string) {
+        super(`${message} (Share was already clicked, so the post may be live.)`);
+        this.name = 'PostMaybePublishedError';
+    }
+}
+
+export interface InboxMessage {
+    itemId: string;
+    fromMe: boolean;
+    senderUsername?: string;
+    text: string;
+    kind: 'text' | 'media' | 'link' | 'other';
+    timestamp: number; // ms
+}
+
+export interface InboxThread {
+    threadId: string;
+    title: string;
+    participants: { username: string; fullName?: string; profilePicUrl?: string }[];
+    isGroup: boolean;
+    lastMessageAt: number; // ms
+    lastMessagePreview?: string;
+    lastMessageFromMe?: boolean;
+    unread: boolean;
+    messages: InboxMessage[];
+    source: 'api' | 'dom'; // 'dom' message ids are synthetic
+}
+
 export class IgClient {
     private browser: puppeteer.Browser | null = null;
     private page: puppeteer.Page | null = null;
     private username: string;
     private password: string;
+    private configAccountId?: string;
     private userDataDir?: string;
     private proxy?: string;
     private logger: any; // Using any or specific Logger type if available
@@ -49,17 +82,23 @@ export class IgClient {
         return this.userDataDir ? path.basename(this.userDataDir) : this.username;
     }
 
+    // Account id from accounts.json (used to key dashboard data such as DM threads)
+    private get accountId(): string {
+        return this.configAccountId || this.statsId;
+    }
+
     private languages: string[] = ['English'];
     private defaultLanguage: string = 'English';
 
     constructor(
-        config: { username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string, headless?: boolean | "shell" },
+        config: { accountId?: string; username?: string; password?: string; userDataDir?: string; proxy?: string, languages?: string[], defaultLanguage?: string, headless?: boolean | "shell" },
         loggerInstance?: any,
         character?: any,
         emailService?: EmailService
     ) {
         this.username = config.username || '';
         this.password = config.password || '';
+        this.configAccountId = config.accountId;
         this.userDataDir = config.userDataDir;
         this.proxy = config.proxy;
         this.logger = loggerInstance || logger;
@@ -1750,6 +1789,558 @@ export class IgClient {
         }
     }
 
+    // ================= DM INBOX (dashboard) =================
+
+    private getThreadIdFromUrl(url: string): string | null {
+        const match = url.match(/\/direct\/t\/([^/?#]+)/);
+        return match ? match[1] : null;
+    }
+
+    private async isAiDisabledForThread(threadId: string): Promise<boolean> {
+        if (mongoose.connection.readyState !== 1) return false;
+        try {
+            const thread = await DmThread.findOne({ accountId: this.accountId, threadId }).select('aiEnabled').lean();
+            return thread?.aiEnabled === false;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Calls Instagram's own web API from inside the logged-in page, so it uses the session's cookies. */
+    private async igWebApi(apiPath: string): Promise<any> {
+        await this.ensurePageActive();
+        if (!this.page) throw new Error("Page not initialized");
+        if (!this.page.url().startsWith('https://www.instagram.com')) {
+            await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "networkidle2" });
+        }
+        const result = await this.page.evaluate(async (url) => {
+            const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || '';
+            const res = await fetch(url, {
+                credentials: 'include',
+                headers: {
+                    'X-IG-App-ID': '936619743392459',
+                    'X-CSRFToken': csrf,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                }
+            });
+            const text = await res.text();
+            return { status: res.status, text };
+        }, apiPath);
+
+        if (result.status !== 200) throw new Error(`Instagram API ${apiPath} returned HTTP ${result.status}`);
+        let data: any;
+        try {
+            data = JSON.parse(result.text);
+        } catch {
+            throw new Error(`Instagram API ${apiPath} did not return JSON`);
+        }
+        if (data?.status && data.status !== 'ok') throw new Error(`Instagram API ${apiPath} status: ${data.status}`);
+        return data;
+    }
+
+    private normalizeApiItem(item: any, viewerPk: string, usersByPk: Map<string, string>): InboxMessage {
+        const type = item.item_type || 'other';
+        let text = item.text || '';
+        let kind: InboxMessage['kind'] = 'text';
+        if (type === 'link') {
+            text = item.link?.text || text;
+            kind = 'link';
+        } else if (type !== 'text') {
+            kind = ['media', 'media_share', 'clip', 'reel_share', 'raven_media', 'animated_media', 'voice_media', 'xma_media_share', 'story_share'].includes(type) ? 'media' : 'other';
+            text = text || item.reel_share?.text || item[type]?.text || `[${type.replace(/_/g, ' ')}]`;
+        }
+        const senderPk = String(item.user_id);
+        return {
+            itemId: String(item.item_id),
+            fromMe: senderPk === viewerPk,
+            senderUsername: senderPk === viewerPk ? this.username : usersByPk.get(senderPk),
+            text,
+            kind,
+            // Instagram timestamps are in microseconds
+            timestamp: Math.floor(Number(item.timestamp) / 1000)
+        };
+    }
+
+    private normalizeApiThread(thread: any, viewerPk: string): InboxThread {
+        const users = (thread.users || []).map((u: any) => ({
+            pk: String(u.pk || u.pk_id || u.id),
+            username: u.username,
+            fullName: u.full_name,
+            profilePicUrl: u.profile_pic_url
+        }));
+        const usersByPk = new Map<string, string>(users.map((u: any) => [u.pk, u.username]));
+        const messages = (thread.items || [])
+            .map((item: any) => this.normalizeApiItem(item, viewerPk, usersByPk))
+            .sort((a: InboxMessage, b: InboxMessage) => a.timestamp - b.timestamp);
+        const last = messages[messages.length - 1];
+        const seenTs = Number(thread.last_seen_at?.[viewerPk]?.timestamp || 0) / 1000;
+        const unread = !!last && !last.fromMe && (thread.read_state === 1 || last.timestamp > seenTs);
+
+        return {
+            threadId: String(thread.thread_id),
+            title: thread.thread_title || users.map((u: any) => u.username).join(', '),
+            participants: users.map(({ pk, ...rest }: any) => rest),
+            isGroup: !!thread.is_group,
+            lastMessageAt: last?.timestamp || Math.floor(Number(thread.last_activity_at || 0) / 1000),
+            lastMessagePreview: last?.text,
+            lastMessageFromMe: last?.fromMe,
+            unread,
+            messages,
+            source: 'api'
+        };
+    }
+
+    /** Reads the newest DM threads (with their latest messages). Falls back to scraping the inbox page if the API is unavailable. */
+    async fetchInbox(limit: number = 20, options: { allowScrape?: boolean } = {}): Promise<InboxThread[]> {
+        try {
+            const data = await this.igWebApi(`/api/v1/direct_v2/inbox/?visual_message_return_type=unseen&persistentBadging=true&limit=${limit}&thread_message_limit=10`);
+            const viewerPk = String(data.viewer?.pk || data.viewer?.pk_id || '');
+            const threads = (data.inbox?.threads || []).map((t: any) => this.normalizeApiThread(t, viewerPk));
+            this.logger.info(`[DM Sync] Fetched ${threads.length} threads via Instagram web API.`);
+            return threads;
+        } catch (err: any) {
+            // Scraping opens (and so marks read) every thread, which would hide them from the auto-responder
+            if (options.allowScrape === false) throw err;
+            this.logger.warn(`[DM Sync] Web API inbox fetch failed (${err.message}). Falling back to page scraping.`);
+            return this.scrapeInbox(Math.min(limit, 10));
+        }
+    }
+
+    async fetchThread(threadId: string, limit: number = 30): Promise<InboxThread> {
+        try {
+            const data = await this.igWebApi(`/api/v1/direct_v2/threads/${encodeURIComponent(threadId)}/?visual_message_return_type=unseen&limit=${limit}`);
+            const viewerPk = String(data.thread?.viewer_id || data.viewer?.pk || '');
+            return this.normalizeApiThread(data.thread, viewerPk);
+        } catch (err: any) {
+            this.logger.warn(`[DM Sync] Web API thread fetch failed (${err.message}). Falling back to page scraping.`);
+            await this.gotoWithRetry(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "networkidle2" });
+            await delay(3000);
+            await this.handleNotificationPopup();
+            return this.scrapeOpenThread(threadId, limit);
+        }
+    }
+
+    private async scrapeOpenThread(threadId: string, limit: number): Promise<InboxThread> {
+        if (!this.page) throw new Error("Page not initialized");
+        const title = await this.page.evaluate(() => {
+            const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
+            return header?.textContent?.trim() || '';
+        });
+        const history = await this.scrapeOpenThreadMessages(this.page, limit);
+        // The page shows no ids or times, so synthesize ordered ones; DOM-sourced threads replace their stored messages
+        const now = Date.now();
+        const messages: InboxMessage[] = history.map((h, i) => ({
+            itemId: `dom_${threadId}_${i}`,
+            fromMe: h.isMine,
+            senderUsername: h.isMine ? this.username : title,
+            text: h.text,
+            kind: 'text',
+            timestamp: now - (history.length - i) * 1000
+        }));
+        const last = messages[messages.length - 1];
+        return {
+            threadId,
+            title,
+            participants: title ? [{ username: title }] : [],
+            isGroup: title.includes(','),
+            lastMessageAt: last?.timestamp || now,
+            lastMessagePreview: last?.text,
+            lastMessageFromMe: last?.fromMe,
+            unread: false,
+            messages,
+            source: 'dom'
+        };
+    }
+
+    private async scrapeInbox(limit: number): Promise<InboxThread[]> {
+        if (!this.page) throw new Error("Page not initialized");
+        await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+        await delay(3000);
+        await this.handleNotificationPopup();
+
+        const threadIds = new Set<string>();
+        for (let i = 0; i < limit; i++) {
+            // Thread rows usually have no links, so each one is opened to learn its id (this marks it read on Instagram)
+            const opened = await this.page.evaluate((index) => {
+                let rows = Array.from(document.querySelectorAll<HTMLElement>('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
+                if (rows.length === 0) {
+                    rows = Array.from(document.querySelectorAll<HTMLElement>('div[role="button"], a')).filter(c => {
+                        const r = c.getBoundingClientRect();
+                        return (r.width > 200 && r.height > 40 && r.height < 150) || (c.tagName === 'A' && c.getAttribute('href')?.startsWith('/direct/t/'));
+                    });
+                }
+                const row = rows[index];
+                if (!row) return false;
+                row.click();
+                return true;
+            }, i);
+            if (!opened) break;
+            await delay(2500);
+            const threadId = this.getThreadIdFromUrl(this.page.url());
+            if (threadId) threadIds.add(threadId);
+        }
+
+        const threads: InboxThread[] = [];
+        for (const threadId of threadIds) {
+            await this.gotoWithRetry(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "networkidle2" });
+            await delay(2500);
+            threads.push(await this.scrapeOpenThread(threadId, 10));
+        }
+        this.logger.info(`[DM Sync] Scraped ${threads.length} threads from the inbox page.`);
+        return threads;
+    }
+
+    private async scrapeOpenThreadMessages(page: puppeteer.Page, limit: number): Promise<{ text: string; isMine: boolean }[]> {
+        return page.evaluate((max) => {
+            const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
+            if (messages.length === 0) return [];
+
+            const historyData = [];
+            let count = 0;
+            for (let i = messages.length - 1; i >= 0 && count < max; i--) {
+                const node = messages[i];
+                const text = node.textContent?.trim() || "";
+                if (!text) continue;
+
+                let isMine = false;
+                let el: HTMLElement | null = node as HTMLElement;
+                let depth = 0;
+                while (el && depth < 6) {
+                    const style = window.getComputedStyle(el);
+                    const bg = style.backgroundColor;
+                    if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
+                        isMine = true;
+                        break;
+                    }
+                    el = el.parentElement;
+                    depth++;
+                }
+                if (!isMine) {
+                    const rect = node.getBoundingClientRect();
+                    const viewWidth = window.innerWidth;
+                    if (rect.left > viewWidth * 0.5) isMine = true;
+                }
+
+                historyData.unshift({ text, isMine });
+                count++;
+            }
+            return historyData;
+        }, limit);
+    }
+
+    /** Types text into the open chat's composer and sends it. Returns false if the chat can't be written to. */
+    private async typeAndSendInOpenChat(page: puppeteer.Page, text: string, partnerLabel: string): Promise<boolean> {
+        // Dismiss any blocking dialogs if present
+        await page.evaluate(() => {
+            const dialog = document.querySelector('div[role="dialog"]');
+            if (dialog) {
+                const closeBtn = Array.from(dialog.querySelectorAll('button, div[role="button"]')).find(b => {
+                    const txt = (b.textContent || '').toLowerCase();
+                    return txt.includes('primary') || txt.includes('haupt') || txt.includes('not now') || txt.includes('nicht jetzt') || txt.includes('cancel') || txt.includes('schließen');
+                });
+                if (closeBtn) (closeBtn as HTMLElement).click();
+            }
+        }).catch(() => {});
+
+        let messageInputEl: ElementHandle<Element> | null = null;
+        const findStart = Date.now();
+        while (Date.now() - findStart < 12000) {
+            if (page.isClosed()) break;
+
+            // Query all candidates inside div[role="main"] or document
+            const inputHandle = await page.evaluateHandle(() => {
+                const main = document.querySelector('div[role="main"]') || document.body;
+                const selectors = [
+                    'div[contenteditable="true"][role="textbox"]',
+                    'div[contenteditable="true"][data-lexical-editor="true"]',
+                    'div[contenteditable="true"][aria-label*="Message"]',
+                    'div[contenteditable="true"][aria-label*="Nachricht"]',
+                    'div[data-lexical-editor="true"]',
+                    'div[role="textbox"][contenteditable="true"]',
+                    'div[contenteditable="true"]',
+                    'div[role="textbox"]',
+                    'p[data-lexical-text="true"]',
+                    'textarea'
+                ];
+
+                const candidates = Array.from(main.querySelectorAll<HTMLElement>(selectors.join(', ')));
+                for (const el of candidates) {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    // Ensure visible, non-zero dimensions, and located in message input area
+                    if (r.width > 50 && r.height > 15 && s.visibility !== 'hidden' && s.display !== 'none') {
+                        if (r.top > 80) {
+                            return el;
+                        }
+                    }
+                }
+                return null;
+            });
+
+            const foundEl = inputHandle.asElement();
+            if (foundEl) {
+                messageInputEl = foundEl as ElementHandle<Element>;
+                await inputHandle.dispose().catch(() => {});
+                break;
+            } else {
+                await inputHandle.dispose().catch(() => {});
+            }
+
+            // Check if chat is restricted or read-only
+            const restrictedReason = await page.evaluate(() => {
+                const text = document.querySelector('div[role="main"]')?.textContent?.toLowerCase() || '';
+                if (text.includes("can't message this account") || text.includes("can't reply to this conversation") || text.includes("nicht auf diese unterhaltung antworten")) {
+                    return "Account is restricted or cannot receive messages";
+                }
+                if (text.includes("only admins can send messages") || text.includes("nur administratoren")) {
+                    return "Only admins can send messages in this conversation";
+                }
+                return null;
+            });
+
+            if (restrictedReason) {
+                this.logger.warn(`Skipping reply to ${partnerLabel}: ${restrictedReason}.`);
+                return false;
+            }
+
+            await delay(500);
+        }
+
+        if (!messageInputEl) {
+            try {
+                const screenshotPath = `logs/dm_input_missing_${partnerLabel.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.png`;
+                await page.screenshot({ path: screenshotPath });
+                this.logger.warn(`Message input element not found for ${partnerLabel}. Saved screenshot: ${screenshotPath}`);
+            } catch { }
+            this.logger.warn(`Message input textbox element could not be found for ${partnerLabel}. Skipping message.`);
+            return false;
+        }
+
+        try {
+            await messageInputEl.focus().catch(() => {});
+            await messageInputEl.click().catch(() => {});
+            await delay(300);
+
+            try {
+                await messageInputEl.type(text, { delay: 20 });
+            } catch {
+                await page.keyboard.type(text, { delay: 20 });
+            }
+            await delay(1000);
+
+            const sendBtn = await page.evaluateHandle(() => {
+                const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                return buttons.find(b => {
+                    const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
+                    return txt === 'send' || txt === 'senden' || txt === 'envoyer';
+                }) || null;
+            });
+
+            const sendBtnEl = sendBtn.asElement();
+            if (sendBtnEl) {
+                await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
+                this.logger.info("DM Sent.");
+                await sendBtnEl.dispose().catch(() => {});
+            } else {
+                await page.keyboard.press('Enter');
+                this.logger.info("DM Sent (via Enter key).");
+            }
+            await sendBtn.dispose().catch(() => {});
+            return true;
+        } finally {
+            await messageInputEl.dispose().catch(() => {});
+        }
+    }
+
+    /** Sends a message typed in the dashboard to an existing thread and returns the refreshed thread. */
+    async sendThreadMessage(threadId: string, text: string): Promise<InboxThread> {
+        await this.ensurePageActive();
+        if (!this.page) throw new Error("Page not initialized");
+
+        await this.gotoWithRetry(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "networkidle2" });
+        await Promise.race([
+            this.page.waitForSelector('div[role="textbox"]', { timeout: 10000 }),
+            this.page.waitForSelector('div[dir="auto"]', { timeout: 10000 })
+        ]).catch(() => {});
+        await delay(1500);
+        await this.handleNotificationPopup();
+
+        const sent = await this.typeAndSendInOpenChat(this.page, text, threadId);
+        if (!sent) throw new Error("Could not send the message (chat input missing or conversation restricted).");
+        new ActivityTracker(this.statsId).trackAction('dms');
+
+        await delay(3000);
+        return this.fetchThread(threadId);
+    }
+
+    // ================= POSTING (dashboard content planner) =================
+
+    /**
+     * Clicks the first visible, enabled control whose text or aria-label exactly matches one of the labels
+     * (case-insensitive). Searches the last matching scope first, i.e. the topmost dialog.
+     */
+    private async clickByText(labels: string[], options: { scope?: string; timeoutMs?: number } = {}): Promise<boolean> {
+        if (!this.page) return false;
+        const deadline = Date.now() + (options.timeoutMs ?? 0);
+        const wanted = labels.map(l => l.toLowerCase());
+        for (;;) {
+            const clicked = await this.page.evaluate((scopeSel, wantedLabels) => {
+                const scopes = scopeSel ? Array.from(document.querySelectorAll(scopeSel)).reverse() : [document.body];
+                for (const scope of scopes) {
+                    const candidates = Array.from(scope.querySelectorAll<HTMLElement>('button, div[role="button"], a, [role="menuitem"], span, svg[aria-label]'));
+                    for (const el of candidates) {
+                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                        if (!wantedLabels.includes(text) && !wantedLabels.includes(aria)) continue;
+                        const target = (el.closest('button, div[role="button"], a, [role="menuitem"]') as HTMLElement | null) || el;
+                        const r = target.getBoundingClientRect();
+                        if (r.width === 0 || r.height === 0) continue;
+                        if ((target as HTMLButtonElement).disabled || target.getAttribute('aria-disabled') === 'true') continue;
+                        target.click();
+                        return true;
+                    }
+                }
+                return false;
+            }, options.scope || '', wanted).catch(() => false);
+            if (clicked) return true;
+            if (Date.now() >= deadline) return false;
+            await delay(500);
+        }
+    }
+
+    private async clickSvgButton(ariaLabels: string[]): Promise<boolean> {
+        if (!this.page) return false;
+        return this.page.evaluate((labels) => {
+            const svg = Array.from(document.querySelectorAll('svg[aria-label]'))
+                .find(s => labels.includes((s.getAttribute('aria-label') || '').trim().toLowerCase()));
+            const target = svg?.closest('a, div[role="button"], button') as HTMLElement | null;
+            if (!target) return false;
+            target.click();
+            return true;
+        }, ariaLabels.map(l => l.toLowerCase())).catch(() => false);
+    }
+
+    private async openCreatePostDialog(): Promise<ElementHandle<HTMLInputElement>> {
+        if (!this.page) throw new Error("Page not initialized");
+        const fileInputSelector = 'div[role="dialog"] input[type="file"]';
+
+        const opened = await this.clickSvgButton(['New post', 'Create', 'Neuer Beitrag', 'Erstellen', 'Nouvelle publication', 'Créer']);
+        if (!opened) throw new Error('Could not find the "Create" button in the Instagram sidebar.');
+
+        let input = await this.page.waitForSelector(fileInputSelector, { timeout: 4000 }).catch(() => null);
+        if (!input) {
+            // Newer layouts open a small menu first (Post / Live video / Ad)
+            const picked = await this.clickSvgButton(['Post', 'Beitrag', 'Publication'])
+                || await this.clickByText(['Post', 'Beitrag', 'Publication'], { scope: 'div[role="dialog"], div[role="menu"]' });
+            if (picked) input = await this.page.waitForSelector(fileInputSelector, { timeout: 10000 }).catch(() => null);
+        }
+        if (!input) throw new Error('The "Create new post" dialog did not open.');
+        return input as ElementHandle<HTMLInputElement>;
+    }
+
+    private async waitForShareResult(timeoutMs: number): Promise<void> {
+        if (!this.page) throw new Error("Page not initialized");
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const state = await this.page.evaluate(() => {
+                const text = Array.from(document.querySelectorAll('div[role="dialog"]'))
+                    .map(d => (d as HTMLElement).innerText.toLowerCase()).join(' ');
+                if (/been shared|wurde geteilt|a été partagée?|post shared|reel shared|beitrag geteilt/.test(text)) return 'shared';
+                if (/couldn't be shared|could not be shared|something went wrong|konnte nicht geteilt|etwas ist schiefgelaufen|n'a pas pu être partagé/.test(text)) return 'error';
+                return 'pending';
+            }).catch(() => 'pending');
+            if (state === 'shared') return;
+            if (state === 'error') throw new Error('Instagram reported that the post could not be shared.');
+            await delay(2000);
+        }
+        throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for Instagram to confirm the post was shared.`);
+    }
+
+    private async findLatestPermalink(): Promise<string | undefined> {
+        if (!this.page) return undefined;
+        await this.gotoWithRetry(`https://www.instagram.com/${this.username}/`, { waitUntil: "networkidle2" });
+        await delay(2500);
+        return this.page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('main a[href*="/p/"], main a[href*="/reel/"]'));
+            // Skip pinned posts, which sit at the start of the grid
+            const latest = links.find(a => !a.querySelector('svg[aria-label*="inned" i], svg[aria-label*="angeheftet" i], svg[aria-label*="fixiert" i], svg[aria-label*="épinglé" i]'));
+            return latest ? new URL(latest.getAttribute('href')!, location.origin).href : undefined;
+        }).catch(() => undefined);
+    }
+
+    /** Publishes a photo, carousel or Reel through Instagram's web "Create" flow. */
+    async createPost(post: { type: 'photo' | 'carousel' | 'reel'; mediaPaths: string[]; caption: string }): Promise<{ permalink?: string }> {
+        await this.ensurePageActive();
+        if (!this.page) throw new Error("Page not initialized");
+        if (post.mediaPaths.length === 0) throw new Error("A post needs at least one media file.");
+
+        const dialog = 'div[role="dialog"]';
+        const nextLabels = ['Next', 'Weiter', 'Suivant'];
+        let shareClicked = false;
+        try {
+            // Start from the profile page: the feed has comment "Post" buttons that could be mistaken for menu items
+            await this.gotoWithRetry(`https://www.instagram.com/${this.username}/`, { waitUntil: "networkidle2" });
+            await delay(2000);
+            await this.handleNotificationPopup();
+
+            this.logger.info(`[Post] Opening "Create" dialog for a ${post.type} with ${post.mediaPaths.length} file(s)...`);
+            const fileInput = await this.openCreatePostDialog();
+            await fileInput.uploadFile(...post.mediaPaths);
+            await delay(3000);
+
+            // Videos trigger a one-time "Video posts are now shared as reels" notice
+            await this.clickByText(['OK'], { scope: dialog, timeoutMs: 3000 });
+
+            // Keep the original aspect ratio instead of Instagram's default square crop
+            if (await this.clickSvgButton(['Select crop', 'Zuschnitt auswählen', 'Sélectionner le recadrage'])) {
+                await delay(800);
+                await this.clickByText(['Original'], { scope: dialog, timeoutMs: 2000 });
+                await delay(800);
+            }
+
+            // Crop -> Edit -> Caption
+            for (const step of ['crop', 'edit']) {
+                if (!await this.clickByText(nextLabels, { scope: dialog, timeoutMs: post.type === 'reel' ? 60000 : 30000 })) {
+                    throw new Error(`"Next" button not found on the ${step} step.`);
+                }
+                await delay(2000);
+            }
+
+            if (post.caption) {
+                const captionBox = await this.page.waitForSelector(`${dialog} div[contenteditable="true"], ${dialog} textarea`, { timeout: 15000 });
+                if (!captionBox) throw new Error("Caption field not found.");
+                await captionBox.click();
+                await delay(300);
+                await this.page.keyboard.type(post.caption, { delay: 8 });
+                await captionBox.dispose().catch(() => {});
+                await delay(1000);
+            }
+
+            if (!await this.clickByText(['Share', 'Teilen', 'Partager'], { scope: dialog, timeoutMs: 10000 })) {
+                throw new Error('"Share" button not found.');
+            }
+            shareClicked = true;
+            this.logger.info("[Post] Shared, waiting for Instagram to finish uploading...");
+            await this.waitForShareResult(post.type === 'reel' ? 5 * 60000 : 90000);
+            this.logger.info("[Post] Instagram confirmed the post was shared.");
+            recordStat(this.statsId, 'posts');
+
+            await this.clickSvgButton(['Close', 'Schließen', 'Fermer']);
+            await delay(1500);
+            return { permalink: await this.findLatestPermalink() };
+        } catch (err) {
+            try {
+                const screenshotPath = `logs/post_fail_${this.statsId}_${Date.now()}.png`;
+                await this.page.screenshot({ path: screenshotPath });
+                this.logger.warn(`[Post] Failed. Saved screenshot: ${screenshotPath}`);
+            } catch { }
+            // Once "Share" was clicked the post may be live even if confirmation failed, so it must not be retried blindly
+            if (shareClicked) throw new PostMaybePublishedError((err as Error).message);
+            throw err;
+        }
+    }
+
     private async respondToCurrentOpenChat(page: puppeteer.Page, activityTracker: ActivityTracker, dmsPerHour: number): Promise<boolean> {
         if (!page || page.isClosed()) return false;
 
@@ -1785,41 +2376,7 @@ export class IgClient {
             }
 
             // 2. Scrape last 10 messages for context
-            const history = await page.evaluate(() => {
-                const messages = Array.from(document.querySelectorAll('div[dir="auto"]'));
-                if (messages.length === 0) return [];
-
-                const historyData = [];
-                let count = 0;
-                for (let i = messages.length - 1; i >= 0 && count < 10; i--) {
-                    const node = messages[i];
-                    const text = node.textContent?.trim() || "";
-                    if (!text) continue;
-
-                    let isMine = false;
-                    let el: HTMLElement | null = node as HTMLElement;
-                    let depth = 0;
-                    while (el && depth < 6) {
-                        const style = window.getComputedStyle(el);
-                        const bg = style.backgroundColor;
-                        if (bg.includes('0, 149, 246') || bg.includes('55, 151, 240') || bg.includes('rgb(0, 100, 224)')) {
-                            isMine = true;
-                            break;
-                        }
-                        el = el.parentElement;
-                        depth++;
-                    }
-                    if (!isMine) {
-                        const rect = node.getBoundingClientRect();
-                        const viewWidth = window.innerWidth;
-                        if (rect.left > viewWidth * 0.5) isMine = true;
-                    }
-
-                    historyData.unshift({ text, isMine });
-                    count++;
-                }
-                return historyData;
-            });
+            const history = await this.scrapeOpenThreadMessages(page, 10);
 
             const lastMessage = history[history.length - 1];
             if (lastMessage && lastMessage.isMine) {
@@ -1830,8 +2387,6 @@ export class IgClient {
                 const lastMessageText = lastMessage.text;
 
                 // Generate Response
-                const schema = getInstagramDMResponseSchema();
-
                 let existingFacts: string[] = [];
                 if (partnerUsername) {
                     try {
@@ -1842,65 +2397,16 @@ export class IgClient {
                     }
                 }
 
-                const historyText = history.map(h => h.isMine ? `[Me]: ${h.text}` : `[Him]: ${h.text}`).join('\n');
-
-                const charName = this.character?.aiPersona?.name || this.character?.name || "User";
-                const charBio = (this.character?.bio || []).join(" ");
-                const charLore = (this.character?.lore || []).join(" ");
-                const charTopics = (this.character?.topics || []).join(", ");
-                const charAdjectives = (this.character?.adjectives || []).join(", ");
-                const charStyle = (this.character?.style?.all || []).join(" ");
-                const charGoal = this.character?.goal || "Engage naturally.";
-                const charLocation = this.character?.location || "Unknown";
-
-                const rawExamples = this.character?.messageExamples || [];
-                let formattedExamples = "";
-                if (rawExamples.length > 0) {
-                    formattedExamples = "\n[EXAMPLE CONVERSATIONS]\n" + rawExamples.map((exList: any[]) => {
-                        return exList.map((msg: any) => {
-                            const role = msg.user === "{{user1}}" ? "User" : charName;
-                            return `${role}: ${msg.content?.text || ""}`;
-                        }).join('\n');
-                    }).join('\n---\n') + "\n";
-                }
-
-                const prompt = `You are ${charName} on Instagram.
-            
-            Your Bio: ${charBio}
-            Your Lore/Backstory: ${charLore}
-            Your Interests: ${charTopics}
-            Your Style/Tone: ${charAdjectives} ${charStyle}
-            Your Location: ${charLocation}
-            
-            Your Main Goal: ${charGoal}
-            ${formattedExamples}
-            You are replying to a DM thread with user: "${partnerUsername}".
-
-            [KNOWN FACTS ABOUT USER]
-            ${existingFacts.length > 0 ? existingFacts.map(f => `- ${f}`).join('\n') : "(None yet)"}
-
-            [CONVERSATION HISTORY (Last 10 messages)]
-            ${historyText}
-
-             Language Configuration:
-            - You speak: [${this.languages.join(', ')}]
-            - Default Language: "${this.defaultLanguage}"
-            
-            Task: Generate a natural response as ${charName}.
-            Guidelines:
-            - IMPORTANT: ALWAYS detect the language of the user's latest incoming message. You MUST respond in that same language (e.g., if the latest message is in German, reply in German; if in French, reply in French). Fallback to your Default Language ("${this.defaultLanguage}") ONLY if the user's language is not one of your spoken languages.
-            - UNIQUE RESPONSES: Avoid repetition. Do NOT repeat or reuse exact sentences, structures, or phrases from your previous messages in the conversation history. Every response must be unique and contextually fresh.
-            - Keep it concise (1-2 sentences usually).
-            - Match your specific tone and style defined above.
-            - If the message is "hi" or generic, reply in character.
-            - If it's spam, ignore it (return empty string or "IGNORE").
-            - Do not be overly helpful assistant-like; be the character.
-            - IMPORTANT: Extract any NEW permanent facts about the user (e.g. name, age, city, pets, likes, relationships) from the conversation. Return them in the 'memory_updates' field.
-            `;
-
-                const result = await runAgent(schema, prompt);
-                let responseText = result[0]?.response;
-                let newFacts = result[0]?.memory_updates || [];
+                const reply = await generateDmReply({
+                    character: this.character,
+                    languages: this.languages,
+                    defaultLanguage: this.defaultLanguage,
+                    partnerUsername,
+                    history,
+                    facts: existingFacts
+                });
+                let responseText = reply.response;
+                let newFacts = reply.memory_updates;
 
                 if (newFacts.length > 0 && partnerUsername && partnerUsername !== "User") {
                     try {
@@ -1921,133 +2427,14 @@ export class IgClient {
                 if (responseText && responseText !== "IGNORE") {
                     this.logger.info(`Generated response: "${responseText}"`);
 
-                    // Dismiss any blocking dialogs if present
-                    await page.evaluate(() => {
-                        const dialog = document.querySelector('div[role="dialog"]');
-                        if (dialog) {
-                            const closeBtn = Array.from(dialog.querySelectorAll('button, div[role="button"]')).find(b => {
-                                const txt = (b.textContent || '').toLowerCase();
-                                return txt.includes('primary') || txt.includes('haupt') || txt.includes('not now') || txt.includes('nicht jetzt') || txt.includes('cancel') || txt.includes('schließen');
-                            });
-                            if (closeBtn) (closeBtn as HTMLElement).click();
-                        }
-                    }).catch(() => {});
+                    const sent = await this.typeAndSendInOpenChat(page, responseText, partnerUsername);
+                    if (!sent) return false;
+                    activityTracker.trackAction('dms');
+                    this.dmsProcessedThisSession = true;
 
-                    let messageInputEl: ElementHandle<Element> | null = null;
-                    const findStart = Date.now();
-                    while (Date.now() - findStart < 12000) {
-                        if (page.isClosed()) break;
-
-                        // Query all candidates inside div[role="main"] or document
-                        const inputHandle = await page.evaluateHandle(() => {
-                            const main = document.querySelector('div[role="main"]') || document.body;
-                            const selectors = [
-                                'div[contenteditable="true"][role="textbox"]',
-                                'div[contenteditable="true"][data-lexical-editor="true"]',
-                                'div[contenteditable="true"][aria-label*="Message"]',
-                                'div[contenteditable="true"][aria-label*="Nachricht"]',
-                                'div[data-lexical-editor="true"]',
-                                'div[role="textbox"][contenteditable="true"]',
-                                'div[contenteditable="true"]',
-                                'div[role="textbox"]',
-                                'p[data-lexical-text="true"]',
-                                'textarea'
-                            ];
-
-                            const candidates = Array.from(main.querySelectorAll<HTMLElement>(selectors.join(', ')));
-                            for (const el of candidates) {
-                                const r = el.getBoundingClientRect();
-                                const s = window.getComputedStyle(el);
-                                // Ensure visible, non-zero dimensions, and located in message input area
-                                if (r.width > 50 && r.height > 15 && s.visibility !== 'hidden' && s.display !== 'none') {
-                                    if (r.top > 80) {
-                                        return el;
-                                    }
-                                }
-                            }
-                            return null;
-                        });
-
-                        const foundEl = inputHandle.asElement();
-                        if (foundEl) {
-                            messageInputEl = foundEl as ElementHandle<Element>;
-                            await inputHandle.dispose().catch(() => {});
-                            break;
-                        } else {
-                            await inputHandle.dispose().catch(() => {});
-                        }
-
-                        // Check if chat is restricted or read-only
-                        const restrictedReason = await page.evaluate(() => {
-                            const text = document.querySelector('div[role="main"]')?.textContent?.toLowerCase() || '';
-                            if (text.includes("can't message this account") || text.includes("can't reply to this conversation") || text.includes("nicht auf diese unterhaltung antworten")) {
-                                return "Account is restricted or cannot receive messages";
-                            }
-                            if (text.includes("only admins can send messages") || text.includes("nur administratoren")) {
-                                return "Only admins can send messages in this conversation";
-                            }
-                            return null;
-                        });
-
-                        if (restrictedReason) {
-                            this.logger.warn(`Skipping reply to ${partnerUsername}: ${restrictedReason}.`);
-                            return false;
-                        }
-
-                        await delay(500);
-                    }
-
-                    if (!messageInputEl) {
-                        try {
-                            const screenshotPath = `logs/dm_input_missing_${partnerUsername.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.png`;
-                            await page.screenshot({ path: screenshotPath });
-                            this.logger.warn(`Message input element not found for ${partnerUsername}. Saved screenshot: ${screenshotPath}`);
-                        } catch { }
-                        this.logger.warn(`Message input textbox element could not be found for ${partnerUsername}. Skipping message.`);
-                        return false;
-                    }
-
-                    try {
-                        await messageInputEl.focus().catch(() => {});
-                        await messageInputEl.click().catch(() => {});
-                        await delay(300);
-
-                        try {
-                            await messageInputEl.type(responseText, { delay: 20 });
-                        } catch {
-                            await page.keyboard.type(responseText, { delay: 20 });
-                        }
-                        await delay(1000);
-
-                        const sendBtn = await page.evaluateHandle(() => {
-                            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-                            return buttons.find(b => {
-                                const txt = (b.textContent || (b as HTMLElement).innerText || '').trim().toLowerCase();
-                                return txt === 'send' || txt === 'senden' || txt === 'envoyer';
-                            }) || null;
-                        });
-
-                        const sendBtnEl = sendBtn.asElement();
-                        if (sendBtnEl) {
-                            await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
-                            this.logger.info("DM Sent.");
-                            activityTracker.trackAction('dms');
-                            this.dmsProcessedThisSession = true;
-                            await sendBtnEl.dispose().catch(() => {});
-                        } else {
-                            await page.keyboard.press('Enter');
-                            this.logger.info("DM Sent (via Enter key).");
-                            activityTracker.trackAction('dms');
-                            this.dmsProcessedThisSession = true;
-                        }
-                        await sendBtn.dispose().catch(() => {});
-
-                        this.logger.info("Waiting 10s before next DM to respect rate limits...");
-                        await delay(10000);
-                        return true;
-                    } finally {
-                        await messageInputEl.dispose().catch(() => {});
-                    }
+                    this.logger.info("Waiting 10s before next DM to respect rate limits...");
+                    await delay(10000);
+                    return true;
                 }
             }
         } catch (e) {
@@ -2107,6 +2494,7 @@ export class IgClient {
             let lastInteractionTime = Date.now();
             const sessionTimeoutMs = 2 * 60 * 1000; // 2 minutes timeout for active conversation
             let hasProcessedAny = false;
+            let skippedThreads = 0;
 
             while (processedCount < maxToProcess) {
                 if (!this.page || this.page.isClosed()) {
@@ -2189,6 +2577,18 @@ export class IgClient {
                 }
 
                 const isThreadOpen = this.page.url().includes("/direct/t/");
+
+                // Per-thread AI switch from the dashboard
+                const openThreadId = isThreadOpen ? this.getThreadIdFromUrl(this.page.url()) : null;
+                if (openThreadId && await this.isAiDisabledForThread(openThreadId)) {
+                    this.logger.info(`AI auto-reply is turned off for thread ${openThreadId}. Skipping.`);
+                    skippedThreads++;
+                    if (processedCount === 0) hasProcessedAny = false; // Don't hold the session open for a skipped thread
+                    if (skippedThreads >= 10) break;
+                    await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+                    await delay(2000);
+                    continue;
+                }
 
                 if (!unreadThreadEl && !isThreadOpen) {
                     if (hasProcessedAny && (Date.now() - lastInteractionTime < sessionTimeoutMs)) {

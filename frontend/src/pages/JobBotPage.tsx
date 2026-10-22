@@ -131,7 +131,7 @@ export const JobBotPage: React.FC = () => {
               gap: '6px',
               padding: '8px 16px',
               borderRadius: 'var(--radius-md)',
-              backgroundColor: status?.running ? 'rgba(248,81,73,0.12)' : 'var(--state-running-bg)',
+              backgroundColor: status?.running ? 'var(--state-error-bg)' : 'var(--state-running-bg)',
               border: `1px solid ${status?.running ? 'var(--state-error-border)' : 'var(--state-running-border)'}`,
               color: status?.running ? 'var(--state-error)' : 'var(--state-running)',
               fontSize: '13px',

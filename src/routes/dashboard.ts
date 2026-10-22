@@ -7,6 +7,8 @@ import { CharacterStore } from '../services/CharacterStore';
 import { LogBus, LogEntry } from '../services/LogBus';
 import logger from '../config/logger';
 import { getStats, GRANULARITIES, Granularity } from '../services/StatsService';
+import dmRoutes from './dms';
+import contentRoutes from './content';
 
 const router = express.Router();
 const botManager = BotManager.getInstance();
@@ -141,6 +143,9 @@ router.get('/auth/me', requireDashboardAuth, (_req: Request, res: Response) => {
 
 // Protect all following routes
 router.use(requireDashboardAuth);
+
+router.use(dmRoutes);
+router.use(contentRoutes);
 
 // ================= OVERVIEW =================
 

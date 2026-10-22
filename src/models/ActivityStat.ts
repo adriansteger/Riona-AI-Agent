@@ -5,6 +5,7 @@ export const STAT_METRICS = [
     'likes',
     'comments',
     'dms',
+    'posts',
     'commentLikes',
     'dmRequestsAccepted',
     'spamRequestsDeleted',

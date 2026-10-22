@@ -66,7 +66,7 @@ export const LogViewer: React.FC<Props> = ({
       style={{
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: '#050709',
+        backgroundColor: 'var(--bg-code)',
         border: '1px solid var(--border-medium)',
         borderRadius: 'var(--radius-md)',
         overflow: 'hidden',
@@ -136,7 +136,7 @@ export const LogViewer: React.FC<Props> = ({
               gap: '4px',
               padding: '3px 8px',
               borderRadius: 'var(--radius-sm)',
-              backgroundColor: autoScroll ? 'rgba(255,87,51,0.15)' : 'var(--bg-surface-elevated)',
+              backgroundColor: autoScroll ? 'var(--accent-bg)' : 'var(--bg-surface-elevated)',
               color: autoScroll ? 'var(--accent)' : 'var(--text-muted)',
               border: `1px solid ${autoScroll ? 'var(--accent)' : 'var(--border-subtle)'}`,
               fontSize: '11px',

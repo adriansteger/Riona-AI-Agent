@@ -115,6 +115,32 @@ export const getInstagramDMResponseSchema = (): InstagramDMResponseSchema => {
   };
 };
 
+export const getInstagramCaptionSchema = () => {
+  return {
+    description: `Writes an Instagram post caption in the persona's voice.`,
+    type: SchemaType.ARRAY,
+    items: {
+      type: SchemaType.OBJECT,
+      properties: {
+        caption: {
+          type: SchemaType.STRING,
+          description: "The caption text without hashtags. Natural, in character, may use line breaks and a few emojis.",
+          nullable: false,
+        },
+        hashtags: {
+          type: SchemaType.ARRAY,
+          description: "5 to 15 relevant hashtags, each starting with #.",
+          nullable: false,
+          items: {
+            type: SchemaType.STRING
+          }
+        }
+      },
+      required: ["caption", "hashtags"],
+    },
+  };
+};
+
 // Define the interface for the Tweet document
 interface ITweet extends Document {
   tweetContent: string;

@@ -40,7 +40,7 @@ export const StatusBadge: React.FC<Props> = ({ state, activeSession }) => {
     disabled: {
       label: 'DISABLED',
       color: 'var(--state-stopped)',
-      bg: 'rgba(50, 50, 50, 0.2)',
+      bg: 'var(--state-stopped-bg)',
       border: 'var(--border-subtle)',
     },
     idle: {

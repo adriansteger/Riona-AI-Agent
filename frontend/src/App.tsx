@@ -8,6 +8,8 @@ import { CharactersPage } from './pages/CharactersPage';
 import { SystemLogsPage } from './pages/SystemLogsPage';
 
 const StatsPage = lazy(() => import('./pages/StatsPage').then(m => ({ default: m.StatsPage })));
+const ContentPage = lazy(() => import('./pages/ContentPage').then(m => ({ default: m.ContentPage })));
+const InboxPage = lazy(() => import('./pages/InboxPage').then(m => ({ default: m.InboxPage })));
 
 export function App() {
   return (
@@ -21,6 +23,8 @@ export function App() {
         <Route path="/jobbot" element={<JobBotPage />} />
         <Route path="/characters" element={<CharactersPage />} />
         <Route path="/stats" element={<Suspense fallback={null}><StatsPage /></Suspense>} />
+        <Route path="/content/:accountId?" element={<Suspense fallback={null}><ContentPage /></Suspense>} />
+        <Route path="/inbox/:accountId?" element={<Suspense fallback={null}><InboxPage /></Suspense>} />
         <Route path="/logs" element={<SystemLogsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
