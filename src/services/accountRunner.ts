@@ -32,11 +32,18 @@ export const createIgClient = (
     }, options.logger, options.character, options.emailService);
 };
 
+const INBOX_SYNC_COOLDOWN_MS = 30 * 60 * 1000;
+const inboxSyncPausedUntil = new Map<string, number>();
+
 const syncInboxQuietly = async (igClient: IgClient, accountId: string, accountLogger: any): Promise<void> => {
+    // After a failure, back off instead of logging the same warning on every DM check
+    if (Date.now() < (inboxSyncPausedUntil.get(accountId) || 0)) return;
     try {
-        await saveInboxThreads(accountId, await igClient.fetchInbox(20, { allowScrape: false }));
+        await saveInboxThreads(accountId, await igClient.fetchInbox());
+        inboxSyncPausedUntil.delete(accountId);
     } catch (err) {
-        accountLogger.warn(`[DM Sync] Inbox sync failed: ${err}`);
+        inboxSyncPausedUntil.set(accountId, Date.now() + INBOX_SYNC_COOLDOWN_MS);
+        accountLogger.warn(`[DM Sync] Inbox sync failed: ${err}. Pausing background inbox sync for 30 minutes.`);
     }
 };
 

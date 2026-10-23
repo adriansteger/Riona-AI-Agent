@@ -141,5 +141,6 @@ src/config/job_accounts.json
 screenshots
 data/job_history.json
 data/media
+data/ig_graphql_docs.json
 frontend/dist
 frontend/node_modules

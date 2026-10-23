@@ -22,6 +22,7 @@ import { recordStat } from "../../services/StatsRecorder";
 import { generateDmReply } from "../../services/DmReplyGenerator";
 import { DmThread } from "../../models/DmThread";
 import mongoose from "mongoose";
+import { IgDirectGraphQL, InboxThread } from "./IgDirectGraphQL";
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -41,27 +42,7 @@ export class PostMaybePublishedError extends Error {
     }
 }
 
-export interface InboxMessage {
-    itemId: string;
-    fromMe: boolean;
-    senderUsername?: string;
-    text: string;
-    kind: 'text' | 'media' | 'link' | 'other';
-    timestamp: number; // ms
-}
-
-export interface InboxThread {
-    threadId: string;
-    title: string;
-    participants: { username: string; fullName?: string; profilePicUrl?: string }[];
-    isGroup: boolean;
-    lastMessageAt: number; // ms
-    lastMessagePreview?: string;
-    lastMessageFromMe?: boolean;
-    unread: boolean;
-    messages: InboxMessage[];
-    source: 'api' | 'dom'; // 'dom' message ids are synthetic
-}
+export type { InboxThread, InboxMessage } from './IgDirectGraphQL';
 
 export class IgClient {
     private browser: puppeteer.Browser | null = null;
@@ -76,6 +57,7 @@ export class IgClient {
     private emailService?: EmailService;
     private headless: boolean | "shell";
     public dmsProcessedThisSession: boolean = false;
+    private directGraphQL: IgDirectGraphQL;
 
     // Key used by ActivityTracker and statistics (matches account.id for profiles under ./profiles/<id>)
     private get statsId(): string {
@@ -107,6 +89,7 @@ export class IgClient {
         this.languages = config.languages || ['English'];
         this.defaultLanguage = config.defaultLanguage || 'English';
         this.headless = config.headless !== undefined ? config.headless : false;
+        this.directGraphQL = new IgDirectGraphQL(this.logger, this.username);
     }
 
     public isConnected(): boolean {
@@ -176,6 +159,9 @@ export class IgClient {
     private async configurePage(page: puppeteer.Page) {
         // 1. Default navigation timeout
         page.setDefaultNavigationTimeout(60000);
+
+        // Learn DM GraphQL doc ids and session fields from the web app's own requests
+        this.directGraphQL.attach(page);
 
         // 2. Proxy authentication setup
         if (this.proxy) {
@@ -1799,195 +1785,46 @@ export class IgClient {
     private async isAiDisabledForThread(threadId: string): Promise<boolean> {
         if (mongoose.connection.readyState !== 1) return false;
         try {
-            const thread = await DmThread.findOne({ accountId: this.accountId, threadId }).select('aiEnabled').lean();
+            const thread = await DmThread.findOne({ accountId: this.accountId, $or: [{ threadId }, { threadFbid: threadId }] }).select('aiEnabled').lean();
             return thread?.aiEnabled === false;
         } catch {
             return false;
         }
     }
 
-    /** Calls Instagram's own web API from inside the logged-in page, so it uses the session's cookies. */
-    private async igWebApi(apiPath: string): Promise<any> {
+    /** Reads the newest DM threads from the web app's own inbox GraphQL data. Never opens a thread. */
+    async fetchInbox(): Promise<InboxThread[]> {
+        await this.ensurePageActive();
+        if (!this.page) throw new Error("Page not initialized");
+        const page = this.page;
+        const { threads, via } = await this.directGraphQL.getInbox(page, async () => {
+            await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
+            await this.handleNotificationPopup();
+        });
+        this.logger.info(`[DM Sync] Fetched ${threads.length} threads via web GraphQL (${via}).`);
+        return threads;
+    }
+
+    /** Reads one thread with its latest messages via GraphQL. Never opens the thread, so it isn't marked read. */
+    async fetchThread(threadId: string): Promise<InboxThread> {
         await this.ensurePageActive();
         if (!this.page) throw new Error("Page not initialized");
         if (!this.page.url().startsWith('https://www.instagram.com')) {
-            await this.gotoWithRetry("https://www.instagram.com/", { waitUntil: "networkidle2" });
+            await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
         }
-        // No async/await in here: with the es6 target TypeScript emits an __awaiter helper that doesn't exist in the page
-        const result = await this.page.evaluate((url) => {
-            const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || '';
-            return fetch(url, {
-                credentials: 'include',
-                headers: {
-                    'X-IG-App-ID': '936619743392459',
-                    'X-CSRFToken': csrf,
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Accept': 'application/json'
-                }
-            }).then(res => res.text().then(text => ({ status: res.status, text })));
-        }, apiPath);
-
-        if (result.status !== 200) throw new Error(`Instagram API ${apiPath} returned HTTP ${result.status}`);
-        let data: any;
+        let thread: InboxThread;
         try {
-            data = JSON.parse(result.text);
-        } catch {
-            throw new Error(`Instagram API ${apiPath} did not return JSON`);
+            thread = await this.directGraphQL.getThread(this.page, threadId);
+        } catch (err) {
+            // Retry with the thread's alternate id in case Instagram expects that one
+            const stored = mongoose.connection.readyState === 1
+                ? await DmThread.findOne({ accountId: this.accountId, threadId }).select('threadFbid').lean().catch(() => null)
+                : null;
+            if (!stored?.threadFbid || stored.threadFbid === threadId) throw err;
+            thread = await this.directGraphQL.getThread(this.page, stored.threadFbid);
         }
-        if (data?.status && data.status !== 'ok') throw new Error(`Instagram API ${apiPath} status: ${data.status}`);
-        return data;
-    }
-
-    private normalizeApiItem(item: any, viewerPk: string, usersByPk: Map<string, string>): InboxMessage {
-        const type = item.item_type || 'other';
-        let text = item.text || '';
-        let kind: InboxMessage['kind'] = 'text';
-        if (type === 'link') {
-            text = item.link?.text || text;
-            kind = 'link';
-        } else if (type !== 'text') {
-            kind = ['media', 'media_share', 'clip', 'reel_share', 'raven_media', 'animated_media', 'voice_media', 'xma_media_share', 'story_share'].includes(type) ? 'media' : 'other';
-            text = text || item.reel_share?.text || item[type]?.text || `[${type.replace(/_/g, ' ')}]`;
-        }
-        const senderPk = String(item.user_id);
-        return {
-            itemId: String(item.item_id),
-            fromMe: senderPk === viewerPk,
-            senderUsername: senderPk === viewerPk ? this.username : usersByPk.get(senderPk),
-            text,
-            kind,
-            // Instagram timestamps are in microseconds
-            timestamp: Math.floor(Number(item.timestamp) / 1000)
-        };
-    }
-
-    private normalizeApiThread(thread: any, viewerPk: string): InboxThread {
-        const users = (thread.users || []).map((u: any) => ({
-            pk: String(u.pk || u.pk_id || u.id),
-            username: u.username,
-            fullName: u.full_name,
-            profilePicUrl: u.profile_pic_url
-        }));
-        const usersByPk = new Map<string, string>(users.map((u: any) => [u.pk, u.username]));
-        const messages = (thread.items || [])
-            .map((item: any) => this.normalizeApiItem(item, viewerPk, usersByPk))
-            .sort((a: InboxMessage, b: InboxMessage) => a.timestamp - b.timestamp);
-        const last = messages[messages.length - 1];
-        const seenTs = Number(thread.last_seen_at?.[viewerPk]?.timestamp || 0) / 1000;
-        const unread = !!last && !last.fromMe && (thread.read_state === 1 || last.timestamp > seenTs);
-
-        return {
-            threadId: String(thread.thread_id),
-            title: thread.thread_title || users.map((u: any) => u.username).join(', '),
-            participants: users.map(({ pk, ...rest }: any) => rest),
-            isGroup: !!thread.is_group,
-            lastMessageAt: last?.timestamp || Math.floor(Number(thread.last_activity_at || 0) / 1000),
-            lastMessagePreview: last?.text,
-            lastMessageFromMe: last?.fromMe,
-            unread,
-            messages,
-            source: 'api'
-        };
-    }
-
-    /** Reads the newest DM threads (with their latest messages). Falls back to scraping the inbox page if the API is unavailable. */
-    async fetchInbox(limit: number = 20, options: { allowScrape?: boolean } = {}): Promise<InboxThread[]> {
-        try {
-            const data = await this.igWebApi(`/api/v1/direct_v2/inbox/?visual_message_return_type=unseen&persistentBadging=true&limit=${limit}&thread_message_limit=10`);
-            const viewerPk = String(data.viewer?.pk || data.viewer?.pk_id || '');
-            const threads = (data.inbox?.threads || []).map((t: any) => this.normalizeApiThread(t, viewerPk));
-            this.logger.info(`[DM Sync] Fetched ${threads.length} threads via Instagram web API.`);
-            return threads;
-        } catch (err: any) {
-            // Scraping opens (and so marks read) every thread, which would hide them from the auto-responder
-            if (options.allowScrape === false) throw err;
-            this.logger.warn(`[DM Sync] Web API inbox fetch failed (${err.message}). Falling back to page scraping.`);
-            return this.scrapeInbox(Math.min(limit, 10));
-        }
-    }
-
-    async fetchThread(threadId: string, limit: number = 30): Promise<InboxThread> {
-        try {
-            const data = await this.igWebApi(`/api/v1/direct_v2/threads/${encodeURIComponent(threadId)}/?visual_message_return_type=unseen&limit=${limit}`);
-            const viewerPk = String(data.thread?.viewer_id || data.viewer?.pk || '');
-            return this.normalizeApiThread(data.thread, viewerPk);
-        } catch (err: any) {
-            this.logger.warn(`[DM Sync] Web API thread fetch failed (${err.message}). Falling back to page scraping.`);
-            await this.gotoWithRetry(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "networkidle2" });
-            await delay(3000);
-            await this.handleNotificationPopup();
-            return this.scrapeOpenThread(threadId, limit);
-        }
-    }
-
-    private async scrapeOpenThread(threadId: string, limit: number): Promise<InboxThread> {
-        if (!this.page) throw new Error("Page not initialized");
-        const title = await this.page.evaluate(() => {
-            const header = document.querySelector('div[role="main"] h2') || document.querySelector('div[role="main"] h1');
-            return header?.textContent?.trim() || '';
-        });
-        const history = await this.scrapeOpenThreadMessages(this.page, limit);
-        // The page shows no ids or times, so synthesize ordered ones; DOM-sourced threads replace their stored messages
-        const now = Date.now();
-        const messages: InboxMessage[] = history.map((h, i) => ({
-            itemId: `dom_${threadId}_${i}`,
-            fromMe: h.isMine,
-            senderUsername: h.isMine ? this.username : title,
-            text: h.text,
-            kind: 'text',
-            timestamp: now - (history.length - i) * 1000
-        }));
-        const last = messages[messages.length - 1];
-        return {
-            threadId,
-            title,
-            participants: title ? [{ username: title }] : [],
-            isGroup: title.includes(','),
-            lastMessageAt: last?.timestamp || now,
-            lastMessagePreview: last?.text,
-            lastMessageFromMe: last?.fromMe,
-            unread: false,
-            messages,
-            source: 'dom'
-        };
-    }
-
-    private async scrapeInbox(limit: number): Promise<InboxThread[]> {
-        if (!this.page) throw new Error("Page not initialized");
-        await this.gotoWithRetry("https://www.instagram.com/direct/inbox/", { waitUntil: "networkidle2" });
-        await delay(3000);
-        await this.handleNotificationPopup();
-
-        const threadIds = new Set<string>();
-        for (let i = 0; i < limit; i++) {
-            // Thread rows usually have no links, so each one is opened to learn its id (this marks it read on Instagram)
-            const opened = await this.page.evaluate((index) => {
-                let rows = Array.from(document.querySelectorAll<HTMLElement>('div[role="listbox"] div[role="button"], div[role="listbox"] a'));
-                if (rows.length === 0) {
-                    rows = Array.from(document.querySelectorAll<HTMLElement>('div[role="button"], a')).filter(c => {
-                        const r = c.getBoundingClientRect();
-                        return (r.width > 200 && r.height > 40 && r.height < 150) || (c.tagName === 'A' && c.getAttribute('href')?.startsWith('/direct/t/'));
-                    });
-                }
-                const row = rows[index];
-                if (!row) return false;
-                row.click();
-                return true;
-            }, i);
-            if (!opened) break;
-            await delay(2500);
-            const threadId = this.getThreadIdFromUrl(this.page.url());
-            if (threadId) threadIds.add(threadId);
-        }
-
-        const threads: InboxThread[] = [];
-        for (const threadId of threadIds) {
-            await this.gotoWithRetry(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "networkidle2" });
-            await delay(2500);
-            threads.push(await this.scrapeOpenThread(threadId, 10));
-        }
-        this.logger.info(`[DM Sync] Scraped ${threads.length} threads from the inbox page.`);
-        return threads;
+        this.logger.info(`[DM Sync] Fetched thread ${thread.threadId} (${thread.messages.length} messages) via web GraphQL.`);
+        return thread;
     }
 
     private async scrapeOpenThreadMessages(page: puppeteer.Page, limit: number): Promise<{ text: string; isMine: boolean }[]> {
@@ -2079,8 +1916,8 @@ export class IgClient {
 
             const foundEl = inputHandle.asElement();
             if (foundEl) {
+                // asElement() returns the same handle, so it must stay alive; the finally below disposes it
                 messageInputEl = foundEl as ElementHandle<Element>;
-                await inputHandle.dispose().catch(() => {});
                 break;
             } else {
                 await inputHandle.dispose().catch(() => {});
@@ -2140,7 +1977,6 @@ export class IgClient {
             if (sendBtnEl) {
                 await sendBtnEl.evaluate((el) => (el as HTMLElement).click());
                 this.logger.info("DM Sent.");
-                await sendBtnEl.dispose().catch(() => {});
             } else {
                 await page.keyboard.press('Enter');
                 this.logger.info("DM Sent (via Enter key).");

@@ -8,7 +8,9 @@ export interface IDmParticipant {
 
 export interface IDmThread extends Document {
     accountId: string;
-    threadId: string;
+    threadId: string; // Id used in /direct/t/<id>/ URLs
+    threadFbid?: string; // Id the GraphQL thread queries take
+    relayId?: string;
     title: string;
     participants: IDmParticipant[];
     isGroup: boolean;
@@ -23,6 +25,8 @@ export interface IDmThread extends Document {
 const DmThreadSchema: Schema = new Schema({
     accountId: { type: String, required: true },
     threadId: { type: String, required: true },
+    threadFbid: { type: String },
+    relayId: { type: String },
     title: { type: String, default: '' },
     participants: {
         type: [{ username: String, fullName: String, profilePicUrl: String, _id: false }],

@@ -20,6 +20,8 @@ export async function saveInboxThreads(accountId: string, threads: InboxThread[]
                     lastMessagePreview: t.lastMessagePreview,
                     lastMessageFromMe: t.lastMessageFromMe,
                     unread: t.unread,
+                    threadFbid: t.threadFbid,
+                    relayId: t.relayId,
                     syncedAt
                 },
                 $setOnInsert: { aiEnabled: true }
@@ -27,10 +29,8 @@ export async function saveInboxThreads(accountId: string, threads: InboxThread[]
             { upsert: true }
         );
 
-        if (t.source === 'dom') {
-            // Scraped messages have synthetic ids, so replace the thread's stored copy instead of merging
-            await DmMessage.deleteMany({ accountId, threadId: t.threadId });
-        }
+        // Messages stored by the old page scraper have synthetic ids and would duplicate the real ones
+        await DmMessage.deleteMany({ accountId, threadId: t.threadId, itemId: /^dom_/ });
         if (t.messages.length === 0) continue;
 
         await DmMessage.bulkWrite(t.messages.map(m => ({

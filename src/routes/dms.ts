@@ -54,7 +54,7 @@ router.post('/accounts/:id/dms/refresh', (req: Request, res: Response) => {
     if (!requireAccount(req, res)) return;
     const accountId = req.params.id;
     const task = botManager.enqueueTask(accountId, 'dm-refresh', async (client) => {
-        const threads = await client.fetchInbox(20);
+        const threads = await client.fetchInbox();
         await saveInboxThreads(accountId, threads);
         return { threads: threads.length };
     });
