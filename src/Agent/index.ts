@@ -37,8 +37,7 @@ export async function runAgent(
   let geminiApiKey = geminiApiKeys[apiKeyIndex];
 
   if (!geminiApiKey) {
-    logger.error("No Gemini API key available.");
-    return "No API key available.";
+    throw new Error("No Gemini API key configured (GEMINI_API_KEYS is empty).");
   }
 
   const generationConfig = {
@@ -56,8 +55,7 @@ export async function runAgent(
     const result = await model.generateContent(prompt);
 
     if (!result || !result.response) {
-      logger.info("No response received from the AI model. || Service Unavailable");
-      return "Service unavailable!";
+      throw new Error("No response received from the AI model (service unavailable).");
     }
 
     const responseText = result.response.text();
@@ -69,20 +67,11 @@ export async function runAgent(
       logger.error(
         `---GEMINI_API_KEY_${apiKeyIndex + 1} limit exhausted, switching to the next API key...`
       );
-      try {
-        // Simple backoff
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        geminiApiKey = getNextAgentApiKey();
-        return runAgent(schema, prompt, currentAgentApiKeyIndex);
-      } catch (keyError) {
-        if (keyError instanceof Error) {
-          logger.error(`API key error: ${keyError.message}`);
-          return `Error: ${keyError.message}`;
-        } else {
-          logger.error("Unknown error when trying to get next API key");
-          return "Error: All API keys have reached their rate limits. Please try again later.";
-        }
-      }
+      // Simple backoff
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Throws once every key has been tried
+      geminiApiKey = getNextAgentApiKey();
+      return runAgent(schema, prompt, currentAgentApiKeyIndex);
     }
     return handleError(error, apiKeyIndex, schema, prompt, runAgent);
   }

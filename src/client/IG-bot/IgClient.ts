@@ -3253,37 +3253,46 @@ export class IgClient {
                             console.log(`Commenting on post ${postIndex}...`);
                             const prompt = `human-like Instagram comment based on to the following post: "${caption}". make sure the reply\n            Matchs the tone of the caption (casual, funny, serious, or sarcastic).\n            Sound organic—avoid robotic phrasing, overly perfect grammar, or anything that feels AI-generated.\n            Use relatable language, including light slang, emojis (if appropriate), and subtle imperfections like minor typos or abbreviations (e.g., 'lol' or 'omg').\n            If the caption is humorous or sarcastic, play along without overexplaining the joke.\n            If the post is serious (e.g., personal struggles, activism), respond with empathy and depth.\n            Avoid generic praise ('Great post!'); instead, react specifically to the content (e.g., 'The way you called out pineapple pizza haters 😂👏').\n            *Keep it concise (1-2 sentences max) and compliant with Instagram's guidelines (no spam, harassment, etc.).*`;
                             const schema = getInstagramCommentSchema();
-                            const result = await runAgent(schema, prompt);
-                            const comment = (result[0]?.comment ?? "") as string;
-                            await commentBox.type(comment);
+                            let comment = "";
+                            try {
+                                const result = await runAgent(schema, prompt);
+                                comment = String(result?.[0]?.comment ?? "").trim();
+                                if (!comment) this.logger.warn(`Skipping comment on post ${postIndex}: AI returned an empty comment.`);
+                            } catch (e: any) {
+                                // Handled here so an AI outage doesn't end the session via the per-post catch
+                                this.logger.warn(`Skipping comment on post ${postIndex}: AI unavailable (${e?.message || e}).`);
+                            }
+                            if (comment) {
+                                await commentBox.type(comment);
 
-                            // New selector approach for the post button
-                            const postButton = await page.evaluateHandle(() => {
-                                const buttons = Array.from(
-                                    document.querySelectorAll('div[role="button"]')
-                                );
-                                return buttons.find(
-                                    (button) =>
-                                        button.textContent === "Post" && !button.hasAttribute("disabled")
-                                );
-                            });
-                            // Only click if postButton is an ElementHandle and not null
-                            const postButtonElement = postButton && postButton.asElement ? postButton.asElement() : null;
-                            if (postButtonElement) {
-                                console.log(`Posting comment on post ${postIndex}...`);
-                                // Click logic...
-                                await this.humanLikeClick(postButtonElement as puppeteer.ElementHandle<Element>);
-                                console.log(`Comment posted on post ${postIndex}.`);
+                                // New selector approach for the post button
+                                const postButton = await page.evaluateHandle(() => {
+                                    const buttons = Array.from(
+                                        document.querySelectorAll('div[role="button"]')
+                                    );
+                                    return buttons.find(
+                                        (button) =>
+                                            button.textContent === "Post" && !button.hasAttribute("disabled")
+                                    );
+                                });
+                                // Only click if postButton is an ElementHandle and not null
+                                const postButtonElement = postButton && postButton.asElement ? postButton.asElement() : null;
+                                if (postButtonElement) {
+                                    console.log(`Posting comment on post ${postIndex}...`);
+                                    // Click logic...
+                                    await this.humanLikeClick(postButtonElement as puppeteer.ElementHandle<Element>);
+                                    console.log(`Comment posted on post ${postIndex}.`);
 
-                                // CHECK FOR ACTION BLOCK (Soft Block)
-                                await delay(2000); // Wait for popup
-                                await this.checkActionBlock("Hashtag Comment Action");
+                                    // CHECK FOR ACTION BLOCK (Soft Block)
+                                    await delay(2000); // Wait for popup
+                                    await this.checkActionBlock("Hashtag Comment Action");
 
-                                activityTracker.trackAction('comments');
-                                // Wait for comment to be posted and UI to update
-                                await delay(2000);
-                            } else {
-                                console.log("Post button not found.");
+                                    activityTracker.trackAction('comments');
+                                    // Wait for comment to be posted and UI to update
+                                    await delay(2000);
+                                } else {
+                                    console.log("Post button not found.");
+                                }
                             }
                         } else {
                             console.log("Comment box not found.");

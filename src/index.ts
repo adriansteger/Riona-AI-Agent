@@ -3,6 +3,7 @@ import logger from "./config/logger";
 import { shutdown } from "./services";
 import app, { botManager } from "./app";
 import { initAgent } from "./Agent/index";
+import { geminiApiKeys } from "./secret";
 
 dotenv.config();
 
@@ -12,6 +13,10 @@ async function startServer() {
   } catch (err) {
     logger.error("Error during agent initialization:", err);
     process.exit(1);
+  }
+
+  if (geminiApiKeys.length === 0) {
+    logger.warn("GEMINI_API_KEYS is not set. AI comments, DM replies, captions and job scoring are disabled until it is.");
   }
 
   const port = parseInt(process.env.PORT || '3000', 10);

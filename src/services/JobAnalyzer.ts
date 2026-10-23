@@ -13,7 +13,7 @@ export class JobAnalyzer {
         this.apiKeys = keys.split(',').map(k => k.trim()).filter(k => k.length > 0);
 
         if (this.apiKeys.length === 0) {
-            logger.warn("No GEMINI_API_KEYS found in .env. AI analysis will be disabled.");
+            logger.warn("No GEMINI_API_KEYS found in .env. Jobs will be skipped until AI analysis is available.");
         }
     }
 
@@ -27,7 +27,7 @@ export class JobAnalyzer {
     async analyzeJob(jobTitle: string, company: string, description: string = "", targetTitle: string, targetPensum?: string): Promise<{ score: number, summary: string, isRelevant: boolean }> {
         const apiKey = this.getNextKey();
         if (!apiKey) {
-            return { score: 100, summary: "AI Analysis Disabled", isRelevant: true };
+            throw new Error("No Gemini API key configured (GEMINI_API_KEYS is empty).");
         }
 
         try {
@@ -63,8 +63,8 @@ export class JobAnalyzer {
 
         } catch (error) {
             logger.error(`AI Analysis failed: ${error}`);
-            // Fallback to accepting it so we don't miss jobs on error
-            return { score: 50, summary: "AI Error - Manual Review Needed", isRelevant: true };
+            // Caller skips the job without marking it processed, so it is retried next run
+            throw error;
         }
     }
 }

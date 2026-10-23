@@ -84,35 +84,24 @@ export async function handleError(
   currentApiKeyIndex: number,
   schema: any,
   prompt: string,
-  runAgent: (schema: any, prompt: string, apiKeyIndex?: number) => Promise<string>
-): Promise<string> {
+  runAgent: (schema: any, prompt: string, apiKeyIndex?: number) => Promise<any>
+): Promise<any> {
   if (error instanceof Error) {
     if (error.message.includes("429 Too Many Requests")) {
       logger.error(`---GEMINI_API_KEY_${currentApiKeyIndex + 1} limit exhausted, switching to the next API key...`);
-      try {
-        getNextApiKey(currentApiKeyIndex);
-        return runAgent(schema, prompt);
-      } catch (keyError) {
-        if (keyError instanceof Error) {
-          logger.error("API key error:", keyError.message);
-          return `Error: ${keyError.message}`;
-        }
-        logger.error("Unknown error when trying to get next API key");
-        return "Error: All API keys have reached their rate limits. Please try again later.";
-      }
+      // Throws once every key has been tried
+      getNextApiKey(currentApiKeyIndex);
+      return runAgent(schema, prompt);
     } else if (error.message.includes("503 Service Unavailable")) {
       logger.error("Service is temporarily unavailable. Retrying...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
       return runAgent(schema, prompt, currentApiKeyIndex);
-    } else if (error.message.includes("All API keys have reached their rate limits")) {
-      logger.error(error.message);
-      return `Error: ${error.message}`;
     }
-    logger.error(`Error generating training prompt: ${error.message}`);
-    return `An error occurred: ${error.message}`;
+    logger.error(`AI request failed: ${error.message}`);
+    throw error;
   }
   logger.error("An unknown error occurred:", error);
-  return "An unknown error occurred.";
+  throw new Error("An unknown error occurred in the AI request.");
 }
 
 // ---------------------- Logging helper ----------------------

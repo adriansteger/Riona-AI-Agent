@@ -483,13 +483,20 @@ export class JobClient {
 
                 // AI Analysis with FULL description
                 logger.info(`Analyzing job with AI... (Target: "${this.config.keywords[0]}", Pensum: "${this.config.pensum}")`);
-                const analysis = await this.analyzer.analyzeJob(
-                    job.title,
-                    job.company,
-                    details.description,
-                    this.config.keywords[0], // targetTitle (e.g. "Verkäufer")
-                    this.config.pensum       // targetPensum (e.g. "40%")
-                );
+                let analysis;
+                try {
+                    analysis = await this.analyzer.analyzeJob(
+                        job.title,
+                        job.company,
+                        details.description,
+                        this.config.keywords[0], // targetTitle (e.g. "Verkäufer")
+                        this.config.pensum       // targetPensum (e.g. "40%")
+                    );
+                } catch (error) {
+                    // Not added to history, so the next run analyzes it again
+                    logger.warn(`Skipping ${job.title}: AI analysis unavailable, will retry next run`);
+                    continue;
+                }
 
                 if (analysis.isRelevant) {
                     logger.info(`Job Match! Score: ${analysis.score}. Queuing for batch email.`);
