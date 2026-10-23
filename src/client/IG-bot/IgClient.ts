@@ -23,6 +23,7 @@ import { generateDmReply } from "../../services/DmReplyGenerator";
 import { DmThread } from "../../models/DmThread";
 import mongoose from "mongoose";
 import { IgDirectGraphQL, InboxThread } from "./IgDirectGraphQL";
+import { AvatarStore } from "../../services/AvatarStore";
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -569,6 +570,29 @@ export class IgClient {
 
         await this.launchBrowserInstance();
         await this.ensureLoggedInState();
+        void this.syncProfilePicture();
+    }
+
+    /** Caches this account's profile picture for the dashboard, using the logged-in session. */
+    private async syncProfilePicture(): Promise<void> {
+        const avatars = AvatarStore.getInstance();
+        if (!this.page || !this.username || avatars.isFresh(this.accountId)) return;
+        try {
+            // No async/await in here: with the es6 target TypeScript emits an __awaiter helper that doesn't exist in the page
+            const picUrl = await this.page.evaluate((username, appId) => {
+                return fetch(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`, {
+                    credentials: 'include',
+                    headers: { 'x-ig-app-id': appId },
+                })
+                    .then(res => res.json())
+                    .then(json => (json?.data?.user?.profile_pic_url_hd || json?.data?.user?.profile_pic_url || null) as string | null);
+            }, this.username, '936619743392459');
+            if (!picUrl) throw new Error('profile has no picture URL');
+            await avatars.saveFromUrl(this.accountId, picUrl, this.proxy);
+            this.logger.info('Cached profile picture for the dashboard.');
+        } catch (err: any) {
+            this.logger.warn(`Could not cache profile picture: ${err.message}`);
+        }
     }
 
     private async loginWithCookies() {

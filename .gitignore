@@ -142,5 +142,6 @@ screenshots
 data/job_history.json
 data/media
 data/ig_graphql_docs.json
+data/avatars
 frontend/dist
 frontend/node_modules

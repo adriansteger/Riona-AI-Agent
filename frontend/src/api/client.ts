@@ -273,6 +273,9 @@ export const api = {
   async getAccount(id: string) {
     return request<{ account: SanitizedAccount }>(`/accounts/${id}`);
   },
+  avatarUrl(id: string) {
+    return `${API_BASE}/accounts/${encodeURIComponent(id)}/avatar`;
+  },
   async createAccount(data: any) {
     return request<{ success: boolean; account: SanitizedAccount }>('/accounts', {
       method: 'POST',

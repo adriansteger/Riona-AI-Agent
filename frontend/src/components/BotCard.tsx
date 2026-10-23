@@ -6,6 +6,20 @@ import { StatusBadge } from './StatusBadge';
 import { Countdown } from './Countdown';
 import { Play, Square, Pause, RotateCw, Terminal, Settings, Heart, MessageCircle, Send, Moon, CalendarDays, MessageSquare } from 'lucide-react';
 
+const AccountAvatar: React.FC<{ accountId: string; username: string }> = ({ accountId, username }) => {
+  const [broken, setBroken] = useState(false);
+  const style: React.CSSProperties = {
+    width: 44, height: 44, borderRadius: 'var(--radius-full)', flexShrink: 0,
+    backgroundColor: 'var(--bg-surface-active)', color: 'var(--text-secondary)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 600,
+    objectFit: 'cover', border: '1px solid var(--border-subtle)',
+  };
+  if (!broken) {
+    return <img src={api.avatarUrl(accountId)} alt="" onError={() => setBroken(true)} style={style} />;
+  }
+  return <div style={style}>{username.slice(0, 2).toUpperCase()}</div>;
+};
+
 interface Props {
   data: AccountOverview;
   onRefresh: () => void;
@@ -58,27 +72,30 @@ export const BotCard: React.FC<Props> = ({ data, onRefresh, onOpenLogs }) => {
     >
       {/* Top Header: ID, Username & Status */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 700, fontSize: '16px', color: 'var(--text-primary)' }}>
-              @{account.username}
-            </span>
-            <span
-              style={{
-                fontSize: '11px',
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--text-muted)',
-                backgroundColor: 'var(--bg-surface-elevated)',
-                padding: '2px 6px',
-                borderRadius: 'var(--radius-sm)',
-              }}
-            >
-              {account.id}
-            </span>
-          </div>
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-            Persona: <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{account.character || 'Default'}</span>
-            {account.proxy && <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>• Proxy Active</span>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+          <AccountAvatar accountId={account.id} username={account.username} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontWeight: 700, fontSize: '16px', color: 'var(--text-primary)' }}>
+                @{account.username}
+              </span>
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)',
+                  backgroundColor: 'var(--bg-surface-elevated)',
+                  padding: '2px 6px',
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                {account.id}
+              </span>
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+              Persona: <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{account.character || 'Default'}</span>
+              {account.proxy && <span style={{ marginLeft: '8px', color: 'var(--text-muted)' }}>• Proxy Active</span>}
+            </div>
           </div>
         </div>
 

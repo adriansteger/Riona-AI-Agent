@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { BotManager } from '../services/BotManager';
 import { ConfigStore } from '../services/ConfigStore';
 import { CharacterStore } from '../services/CharacterStore';
+import { AvatarStore } from '../services/AvatarStore';
 import { LogBus, LogEntry } from '../services/LogBus';
 import logger from '../config/logger';
 import { getStats, GRANULARITIES, Granularity } from '../services/StatsService';
@@ -14,6 +15,7 @@ const router = express.Router();
 const botManager = BotManager.getInstance();
 const configStore = ConfigStore.getInstance();
 const characterStore = CharacterStore.getInstance();
+const avatarStore = AvatarStore.getInstance();
 const logBus = LogBus.getInstance();
 
 const DASHBOARD_SECRET = process.env.DASHBOARD_JWT_SECRET || process.env.JWT_SECRET || 'fallbackDashSecret987!';
@@ -208,6 +210,22 @@ router.get('/accounts/:id', (req: Request, res: Response) => {
         return res.status(404).json({ error: 'Account not found' });
     }
     return res.json({ account });
+});
+
+router.get('/accounts/:id/avatar', async (req: Request, res: Response) => {
+    const account = configStore.getAccount(req.params.id);
+    if (!account) {
+        return res.status(404).json({ error: 'Account not found' });
+    }
+    try {
+        const image = await avatarStore.get(account.id, account.username, account.proxy || undefined);
+        if (!image) return res.status(404).json({ error: 'Profile picture unavailable' });
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        return res.send(image);
+    } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+    }
 });
 
 router.post('/accounts', (req: Request, res: Response) => {
